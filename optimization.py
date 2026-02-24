@@ -29,7 +29,7 @@ class object_detection_loss(nn.Module):
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
 
         if target_classes_o.numel() != 0:
-            target_classes_o = target_classes_o.to(dtype=torch.long)
+            target_classes_o = target_classes_o.to(device=src_logits.device, dtype=torch.long)
             target_classes[idx] = target_classes_o
         else:
             empty_batch = True
@@ -42,7 +42,7 @@ class object_detection_loss(nn.Module):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0).to(src_boxes.device)
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
         loss_giou = 1 - torch.diag(funcs.generalized_box_iou(funcs.box_cxcywh_to_xyxy(src_boxes),
                                                             funcs.box_cxcywh_to_xyxy(target_boxes)))
@@ -57,6 +57,14 @@ class object_detection_loss(nn.Module):
         return batch_idx, src_idx
 
     def forward(self, outputs, targets):
+
+        # Expand 2D boxes [center, width] to 4D [cx, cy, w, h] for matcher/loss
+        device = next(iter(outputs.values())).device
+        outputs = {k: v.clone() for k, v in outputs.items()}
+        targets = [{k: v.clone().to(device) for k, v in t.items()} for t in targets]
+        if outputs['pred_boxes'].shape[-1] == 2:
+            outputs = funcs.boxes_dimension_expansion(outputs, dtype='outputs')
+            targets = funcs.boxes_dimension_expansion(targets, dtype='targets')
 
         indices = self.matcher(outputs, targets)
 
@@ -86,7 +94,7 @@ class sampling_point_classification_loss(nn.Module):
     def forward(self, outputs, targets):
 
         logits = rearrange(outputs["pred_logits"], 'b l c -> (b l) c').to(torch.float32)
-        labels = torch.cat([t["labels"] for t in targets], dim=0).to(torch.long)
+        labels = torch.cat([t["labels"] for t in targets], dim=0).to(device=logits.device, dtype=torch.long)
 
         return self.loss_labels(logits, labels)
 
@@ -96,10 +104,19 @@ def od2sc_targets(od_box_data, seq_length):
     sc_point_data, interval = [], 1 / (seq_length + 1)
     for box_data in od_box_data:
         point_data = torch.zeros(seq_length, dtype=torch.long)
-        tmp = torch.round(box_data['boxes'] / interval).int()
-        tmp = torch.clamp(tmp, min=1, max=seq_length) - 1
-        for k in range(tmp.shape[0]):
-            point_data[tmp[k, 0]:tmp[k, 1] + 1] = box_data['labels'][k] + 1
+        if box_data['boxes'].numel() == 0:
+            sc_point_data += [{"labels": point_data}]
+            continue
+        centers = box_data['boxes'][:, 0]
+        widths = box_data['boxes'][:, 1]
+        x1 = centers - widths / 2.0
+        x2 = centers + widths / 2.0
+        starts = torch.round(x1 / interval).int()
+        ends = torch.round(x2 / interval).int()
+        starts = torch.clamp(starts, min=1, max=seq_length) - 1
+        ends = torch.clamp(ends, min=1, max=seq_length) - 1
+        for k in range(starts.shape[0]):
+            point_data[starts[k]:ends[k] + 1] = box_data['labels'][k] + 1
         sc_point_data += [{"labels": point_data}]
     return sc_point_data
 
@@ -116,7 +133,11 @@ def sc2od_targets(sc_point_data, seq_length):
         for i in range(tmp_data.shape[0]):
             if start is not None:
                 if tmp_data[i] != last:
-                    boxes.append([(start + 1) / length, min((i + 1) / length, 1.0)])
+                    x1 = (start + 1) / length
+                    x2 = min((i + 1) / length, 1.0)
+                    center = (x1 + x2) / 2.0
+                    width = x2 - x1
+                    boxes.append([center, width])
                     labels.append(label - 1)
                     if tmp_data[i] != 0:
                         start, label, last = i, tmp_data[i], tmp_data[i]
@@ -131,7 +152,11 @@ def sc2od_targets(sc_point_data, seq_length):
                     start, label, last = i, tmp_data[i], tmp_data[i]
 
         if start is not None:
-            boxes.append([(start + 1) / length, 1.0])
+            x1 = (start + 1) / length
+            x2 = 1.0
+            center = (x1 + x2) / 2.0
+            width = x2 - x1
+            boxes.append([center, width])
             labels.append(label - 1)
 
         boxes = torch.tensor(boxes)
@@ -160,8 +185,10 @@ class dual_task_contrastive_loss(nn.Module):
 
     def _get_sampling_point_classification_targets(self, od_outputs, od_targets):
 
-        od_outputs = funcs.boxes_dimension_expansion(od_outputs, dtype='outputs')
-        od_targets = funcs.boxes_dimension_expansion(od_targets, dtype='targets')
+        od_outputs = funcs.boxes_dimension_expansion(
+            {k: v.clone() for k, v in od_outputs.items()}, dtype='outputs')
+        od_targets = funcs.boxes_dimension_expansion(
+            [{k: v.clone() for k, v in t.items()} for t in od_targets], dtype='targets')
         indices = self.matcher(od_outputs, od_targets)
         selected_indices = [item[0] for item in indices]
 
@@ -180,11 +207,13 @@ class dual_task_contrastive_loss(nn.Module):
 
     def forward(self, od_outputs, sc_outputs, od_targets):
 
-        sc_con_targets = self._get_sampling_point_classification_targets(od_outputs, od_targets)
-        od_con_targets = self._get_object_detection_targets(sc_outputs)
-        od_con_targets = funcs.boxes_dimension_expansion(od_con_targets, dtype='targets')
+        od_detached = {k: v.detach() for k, v in od_outputs.items()}
+        sc_detached = {k: v.detach() for k, v in sc_outputs.items()}
 
-        sc_loss_values =self.sc_contrastive_loss(sc_outputs, sc_con_targets)
+        sc_con_targets = self._get_sampling_point_classification_targets(od_detached, od_targets)
+        od_con_targets = self._get_object_detection_targets(sc_detached)
+
+        sc_loss_values = self.sc_contrastive_loss(sc_outputs, sc_con_targets)
         od_loss_values = self.od_contrastive_loss(od_outputs, od_con_targets)
 
         return sc_loss_values + od_loss_values
@@ -205,7 +234,12 @@ class spatio_temporal_contrast_loss(nn.Module):
 
     def forward(self, od_outputs, sc_outputs, od_targets, delta=1):
 
-        ret_loss = self.dc_loss(od_outputs, sc_outputs, od_targets) * delta
-        ret_loss += self.od_loss(od_outputs, od_targets)
-        ret_loss += self.sc_loss(sc_outputs, od2sc_targets(od_targets, self.seq_length))
+        # Deep copy targets to prevent in-place mutation across loss terms
+        od_targets_dc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
+        od_targets_od = [{k: v.clone() for k, v in t.items()} for t in od_targets]
+        od_targets_sc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
+
+        ret_loss = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * delta
+        ret_loss += self.od_loss(od_outputs, od_targets_od)
+        ret_loss += self.sc_loss(sc_outputs, od2sc_targets(od_targets_sc, self.seq_length))
         return ret_loss

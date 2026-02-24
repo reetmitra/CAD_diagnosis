@@ -15,7 +15,7 @@ import augmentation as aug
 
 class sc_net_framework:
 
-    def __init__(self, pattern='pre_training', state_dict_root=None):
+    def __init__(self, pattern='pre_training', state_dict_root=None, data_root=None):
 
         if pattern == "pre_training":
             self.model_pattern = "training"
@@ -34,7 +34,15 @@ class sc_net_framework:
 
         if pattern != 'inference':
 
-            self.data_root = opt.data_params["dataset_root"]
+            if data_root is not None:
+                self.data_root = data_root
+            elif pattern == 'pre_training':
+                self.data_root = opt.data_params["pretrain_data_root"]
+            elif pattern == 'fine_tuning':
+                self.data_root = opt.data_params["finetune_data_root"]
+            else:
+                self.data_root = opt.data_params["dataset_root"]
+
             self.train_ratio = opt.data_params["train_ratio"]
             self.input_shape = opt.net_params["input_shape"]
             self.window_lw = opt.data_params["window_lw"]
@@ -92,10 +100,10 @@ class sc_net_framework:
         return DataLoader(dataset_training, batch_size=self.batch_size, shuffle=True, collate_fn=aug.collate_fn),\
                DataLoader(dataset_testing, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn)
 
-    def pre_training_load(self, ):
+    def pre_training_load(self):
 
         model_dict = self.model.state_dict()
-        pretrained_dict = torch.load(self.state_dict_root)
+        pretrained_dict = torch.load(self.state_dict_root, map_location='cpu')
 
         pretrained_dict_filtered = {}
         for k, v in pretrained_dict.items():

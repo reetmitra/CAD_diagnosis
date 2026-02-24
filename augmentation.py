@@ -140,11 +140,16 @@ class cubic_sequence_data(data.Dataset):
         for i in range(labels_data.shape[0]):
             if start is not None:
                 if labels_data[i] != last:
-                    boxes.append([(start + 1) / length, min((i + 1) / length, 1.0)])
+                    x1 = (start + 1) / length
+                    x2 = min((i + 1) / length, 1.0)
+                    center = (x1 + x2) / 2.0
+                    width = x2 - x1
+                    boxes.append([center, width])
                     labels.append(label - 1)
                     if labels_data[i] != 0:
                         start, label, last = i, labels_data[i], labels_data[i]
-                    else: start, label, last = None, 0, -1
+                    else:
+                        start, label, last = None, 0, -1
                 else:
                     continue
             else:
@@ -154,17 +159,22 @@ class cubic_sequence_data(data.Dataset):
                     start, label, last = i, labels_data[i], labels_data[i]
 
         if start is not None:
-            boxes.append([(start + 1) / length, 1.0])
+            x1 = (start + 1) / length
+            x2 = 1.0
+            center = (x1 + x2) / 2.0
+            width = x2 - x1
+            boxes.append([center, width])
             labels.append(label - 1)
 
         labels = torch.tensor(labels, dtype=torch.int64)
-        boxes = torch.tensor(boxes, dtype=torch.torch.float32)
+        boxes = torch.tensor(boxes, dtype=torch.float32)
         return {"labels": labels, "boxes": boxes}
 
     def __getitem__(self, index):
 
-        volumes_file = os.path.join(self.volumes_root, self.volumes_file_list[index])
-        labels_file = os.path.join(self.labels_root, self.labels_file_list[index])
+        actual_index = index + self.data_start
+        volumes_file = os.path.join(self.volumes_root, self.volumes_file_list[actual_index])
+        labels_file = os.path.join(self.labels_root, self.labels_file_list[actual_index])
         ret_volumes, ret_labels = self.read_data(volumes_file, labels_file)
         ret_volumes = funcs.normalize_ct_data(ret_volumes, hu_min=self.window[0], hu_max=self.window[1])
         return {'image': torch.tensor(ret_volumes,dtype=torch.float32), 'target': self.detection_targets(ret_labels)}

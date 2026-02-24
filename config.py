@@ -2,6 +2,8 @@ class DefaultConfig(object):
 
     data_params = {
         "dataset_root": r'augmented_data_root',
+        "pretrain_data_root": r'augmented_data_root',
+        "finetune_data_root": r'clinical_data_root',
         "eos_coef": 0.2,
         "train_ratio": 0.8,
         "window_lw": [300, 900],
@@ -30,7 +32,7 @@ class DefaultConfig(object):
         "spatial_2dconv_layers" : [2, 2, 2, 2],
         "spatial_2d_weight" : [0.25, 0.25, 0.25, 0.25],
         "spatial_3d_weight" : 0.75,
-        "spatial_proj_channels" : [128, 1024, 128, 512],
+        "spatial_proj_channels" : [128, 256, 16, 512],
         "spatial_embedding_shape" : [16, 512],
         "spatial_transfromer_param" : [4, 4],
         "spatial_num_query" : 16,

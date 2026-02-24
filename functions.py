@@ -24,7 +24,7 @@ def is_empty_tensor(tensor):
     return tensor.numel() == 0
 
 
-def normalize_ct_data(data_array, hu_min=-200, hu_max=800):
+def normalize_ct_data(data_array, hu_min=-150, hu_max=750):
 
     clipped_array = np.clip(data_array, hu_min, hu_max)
     normalized_array = (clipped_array - hu_min) / (hu_max - hu_min)
@@ -35,7 +35,8 @@ def _3d_cubes_selection(input_volume, cube_size, num_cubes, step, batch_size):
 
     b, n_l, n_h, n_w = input_volume.shape
     centers = [step // 2 + step * i - 1 for i in range(num_cubes)]
-    output_cubes = torch.zeros((batch_size, len(centers), cube_size, cube_size, cube_size))
+    output_cubes = torch.zeros((batch_size, len(centers), cube_size, cube_size, cube_size),
+                               device=input_volume.device, dtype=input_volume.dtype)
 
     for i, center in enumerate(centers):
         start = center - cube_size // 2
