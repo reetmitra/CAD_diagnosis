@@ -90,19 +90,22 @@ class sc_net_framework:
             pattern='training',
             train_ratio=self.train_ratio,
             input_shape=self.input_shape,
-            window=self.window_lw)
+            window=self.window_lw,
+            num_classes=self.model_num_classes)
         dataset_validation = aug.cubic_sequence_data(
             dataset_root=self.data_root,
             pattern='validation',
             train_ratio=self.train_ratio,
             input_shape=self.input_shape,
-            window=self.window_lw)
+            window=self.window_lw,
+            num_classes=self.model_num_classes)
         dataset_testing = aug.cubic_sequence_data(
             dataset_root=self.data_root,
             pattern='testing',
             train_ratio=self.train_ratio,
             input_shape=self.input_shape,
-            window=self.window_lw)
+            window=self.window_lw,
+            num_classes=self.model_num_classes)
         return DataLoader(dataset_training, batch_size=self.batch_size, shuffle=True, collate_fn=aug.collate_fn),\
                DataLoader(dataset_validation, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn),\
                DataLoader(dataset_testing, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn)

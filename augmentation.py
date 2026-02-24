@@ -132,13 +132,14 @@ def online_augment(volume, labels):
 
 
 class cubic_sequence_data(data.Dataset):
-    def __init__(self, dataset_root, pattern='training', train_ratio=0.8, input_shape=[256,64,64], window=[300, 900], augment=False):
+    def __init__(self, dataset_root, pattern='training', train_ratio=0.8, input_shape=[256,64,64], window=[300, 900], augment=False, num_classes=None):
 
         self.volumes_root = os.path.join(dataset_root, 'volumes/')
         self.labels_root = os.path.join(dataset_root, 'labels/')
         self.input_shape, self.window = input_shape, [window[0] - window[1] / 2, window[0] + window[1] / 2]
         self.augment = augment
         self.pattern = pattern
+        self.num_classes = num_classes
 
         self.volumes_file_list = os.listdir(self.volumes_root)
         self.volumes_file_list = sorted(self.volumes_file_list)
@@ -218,6 +219,9 @@ class cubic_sequence_data(data.Dataset):
         ret_volumes, ret_labels = self.read_data(volumes_file, labels_file)
         if self.augment and self.pattern == 'training':
             ret_volumes, ret_labels = online_augment(ret_volumes, ret_labels)
+        # Remap labels when num_classes < max label (e.g. pre_training 3-class on 6-class data)
+        if self.num_classes is not None:
+            ret_labels = np.where(ret_labels > 0, ((ret_labels - 1) % self.num_classes) + 1, ret_labels)
         ret_volumes = funcs.normalize_ct_data(ret_volumes, hu_min=self.window[0], hu_max=self.window[1])
         return {'image': torch.tensor(ret_volumes,dtype=torch.float32), 'target': self.detection_targets(ret_labels)}
 

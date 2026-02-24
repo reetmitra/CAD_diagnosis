@@ -111,7 +111,10 @@ class HungarianMatcher(nn.Module):
 def box_lastdim_expansion(data):
 
     if is_empty_tensor(data) == True:
-        return data
+        # Return empty tensor with correct last dimension (4) to avoid cat mismatches
+        shape = list(data.shape)
+        shape[-1] = 4
+        return torch.zeros(shape, dtype=data.dtype, device=data.device)
 
     expanded_data = data.unsqueeze(-2).expand(*data.shape[:-1], 2, 2).reshape(*data.shape[:-1], 4)
     return expanded_data[..., [0, 2, 1, 3]]

@@ -214,6 +214,7 @@ class Trainer:
                 input_shape=fw.input_shape,
                 window=fw.window_lw,
                 augment=True,
+                num_classes=self.num_classes,
             )
         else:
             train_dataset = fw.dataLoader_train.dataset
