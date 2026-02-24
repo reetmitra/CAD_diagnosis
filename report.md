@@ -8,10 +8,10 @@ SC-Net (Spatio-Temporal Contrast Network) is a dual-branch deep learning archite
 
 The architecture consists of two branches:
 
-- **Temporal branch**: Classifies sampling points along the coronary artery centerline (stenosis degree and plaque composition).
-- **Spatial branch**: Performs object detection of lesion regions using a DETR-style transformer with Hungarian matching.
+- **Temporal branch**: Classifies sampling points along the coronary artery centerline (stenosis degree and plaque composition) using a shallow 3D-CNN per cube, a Transformer encoder for multi-location temporal correlation, and per-point MLP classification heads.
+- **Spatial branch**: Performs object detection of lesion regions using multi-view 3D/2D CNN feature extraction with learnable fusion (Eq. 2), a DETR-style Transformer decoder with learned query embeddings, and Hungarian matching for set-based prediction.
 
-A dual-task contrastive loss provides cross-supervision between the two branches, where each branch's predictions serve as detached pseudo-labels for the other. This is the core novelty of the paper, enabling data-efficient learning on small medical imaging datasets.
+A dual-task contrastive loss (Eq. 7) provides cross-supervision between the two branches, where each branch's predictions are detached and transformed into pseudo-labels for the other via `C(·)` and `C⁻¹(·)` mapping functions. This is the core novelty of the paper, enabling data-efficient learning on small medical imaging datasets.
 
 ---
 
@@ -53,14 +53,14 @@ This phase addressed 15+ bugs across 6 files. The fixes fall into three categori
 | 1 | `nn.ModuleList` for extraction blocks | `architecture.py` | 3D/2D extraction block weights were invisible to the optimizer and could not be moved to GPU. The spatial branch was completely untrained. |
 | 2 | Feature weight device handling (`nn.Parameter`) | `architecture.py` | `_2d_maps_to_3d_maps` created a new CPU tensor every forward pass, causing immediate crash on GPU. Now stored as `nn.Parameter`. |
 | 3 | Fixed query embeddings (`nn.Embedding`) | `architecture.py` | `torch.randint` generated random query indices every forward pass, making the decoder non-deterministic and preventing learned object queries from converging. Replaced with fixed learned `nn.Embedding` (DETR standard). |
-| 4 | Spatial flattening projection | `architecture.py` | `Conv3d` flattening layer defined in `__init__` was never called in `forward()`. The rearrange pattern was also incorrect. Now properly applies Conv3d(128->16) before flattening and linear projection, producing 16 spatial tokens of 512 dimensions. |
+| 4 | Spatial flattening projection | `architecture.py` | `Conv3d` flattening layer defined in `__init__` was never called in `forward()`. The rearrange pattern was also incorrect. Now properly applies Conv3d(128→16) before flattening and linear projection, producing 16 spatial tokens of 512 dimensions. |
 
 #### Architectural Corrections
 
 | # | Fix | File | Impact |
 |---|-----|------|--------|
-| 5 | Gradient detachment in contrastive loss | `optimization.py` | Raw model outputs (with gradients) were used as pseudo ground truth, creating circular gradient flow. Detaching ensures each branch receives clean supervision from the other -- the core novelty of the paper. |
-| 6 | Learnable view fusion weights | `architecture.py` | `_3d_weight` (0.75) and `_2d_weight` ([0.25 x4]) were fixed scalars. Now `nn.Parameter` so the model learns optimal fusion ratios between 3D-CNN and multi-view 2D-CNN features (Eq. 2 in paper). |
+| 5 | Gradient detachment in contrastive loss | `optimization.py` | Raw model outputs (with gradients) were used as pseudo ground truth, creating circular gradient flow. Detaching ensures each branch receives clean supervision from the other — the core novelty of the paper. |
+| 6 | Learnable view fusion weights | `architecture.py` | `_3d_weight` (0.75) and `_2d_weight` ([0.25 ×4]) were fixed scalars. Now `nn.Parameter` so the model learns optimal fusion ratios between 3D-CNN and multi-view 2D-CNN features (Eq. 2 in paper). |
 | 7 | Box format: center-width | `augmentation.py`, `optimization.py` | Boxes stored as `[start, end]` but matcher called `box_cxcywh_to_xyxy` assuming `[center, width]`. Mismatch caused incorrect Hungarian matching and IoU computation. All box generation now uses center-width format consistently. |
 | 8 | Auto box dimension expansion | `optimization.py` | 1D boxes `[center, width]` automatically expanded to 4D `[cx, cy, w, h]` inside `object_detection_loss.forward()`, ensuring the DETR-style matcher and GIoU loss work correctly regardless of input format. |
 
@@ -79,9 +79,9 @@ This phase addressed 15+ bugs across 6 files. The fixes fall into three categori
 
 | # | Change | File | Reason |
 |---|--------|------|--------|
-| 15 | `spatial_proj_channels`: [128,1024,128,512] to [128,256,16,512] | `config.py` | Matches actual feature dimensions after 4 pooling levels (16x4x4 = 256 spatial elements, 16 output tokens). |
+| 15 | `spatial_proj_channels`: [128,1024,128,512] → [128,256,16,512] | `config.py` | Matches actual feature dimensions after 4 pooling levels (16×4×4 = 256 spatial elements, 16 output tokens). |
 | 16 | Two-stage data roots | `config.py`, `framework.py` | Added `pretrain_data_root` and `finetune_data_root` with CLI override via `--data_root`. |
-| 17 | Default HU window: [-200,800] to [-150,750] | `functions.py` | Matches the actual values computed from config `window_lw=[300,900]`. |
+| 17 | Default HU window: [-200,800] → [-150,750] | `functions.py` | Matches the actual values computed from config `window_lw=[300,900]`. |
 
 ---
 
@@ -91,7 +91,7 @@ This phase addressed 15+ bugs across 6 files. The fixes fall into three categori
 
 This phase delivered the complete training and evaluation pipeline.
 
-#### train.py -- Training Loop
+#### train.py — Training Loop
 
 Complete training script with the following features:
 
@@ -104,7 +104,7 @@ Complete training script with the following features:
 | Validation | Per-epoch evaluation on held-out split |
 | CLI flags | `--pattern`, `--data_root`, `--epochs`, `--lr`, `--weight_decay`, `--grad_clip`, `--device` |
 
-#### eval.py -- Evaluation Script
+#### eval.py — Evaluation Script
 
 Artery-level evaluation computing per-class metrics from the MICCAI 2024 paper:
 
@@ -113,65 +113,128 @@ Artery-level evaluation computing per-class metrics from the MICCAI 2024 paper:
 - Supports both `pre_training` (3-class) and `fine_tuning` (6-class) modes
 - Fixed to use all files when explicit `--data_root` is provided
 
-#### generate_dummy_data.py -- Synthetic Data
+#### generate_dummy_data.py — Synthetic Data
 
 Creates synthetic NIfTI volumes and label files for testing the full pipeline without real clinical data. Enables end-to-end validation of the training loop.
 
 ---
 
-### Phase 4: Training Enhancements (2026-02-24, Current)
+### Phase 4: Training Enhancements & Additional Bug Fixes (2026-02-24)
 
 **Commit:** `7a89115` Fix 5 bugs and add evaluation infrastructure
 
-Seven advanced training features were implemented:
+This phase added seven training enhancements and identified five additional bugs through rigorous code-to-paper analysis.
 
-#### 1. Mixed-Precision Training (AMP)
+#### Training Enhancements
 
-- `torch.amp.GradScaler` + `autocast` for approximately 1.5-2x speedup on RTX 3090
+**1. Mixed-Precision Training (AMP)**
+- `torch.amp.GradScaler` + `autocast` for approximately 1.5–2× speedup on RTX 3090
 - Enabled by default with `--amp` flag
 - Reduces GPU memory usage, allowing larger effective batch sizes
 
-#### 2. Multi-GPU Training (DDP)
-
+**2. Multi-GPU Training (DDP)**
 - `DistributedDataParallel` support for both available RTX 3090 GPUs
 - Launch via `torchrun --nproc_per_node=2 train.py`
 - Leverages existing distributed utilities in `functions.py` (`get_world_size`, `init_distributed_mode`)
 - Doubles effective batch size or halves wall-clock training time
 
-#### 3. Online Data Augmentation
-
-- Random rotation (+/-15 degrees) with 50% probability
-- Intensity jitter (+/-50 HU) with 50% probability
+**3. Online Data Augmentation**
+- Random rotation (±15 degrees) with 50% probability
+- Intensity jitter (±50 HU) with 50% probability
 - Random depth flip with 50% probability
 - Enabled via `--augment` flag
 - Critical for medical imaging where labeled data is scarce
 
-#### 4. Evaluation Metrics in Training
-
+**4. Evaluation Metrics in Training**
 - Per-epoch validation computes accuracy, precision, recall, F1, and specificity
 - Metrics computed for both stenosis degree and plaque composition classification tasks
 - Logged alongside training/validation loss
 
-#### 5. Learning Rate Warmup
-
+**5. Learning Rate Warmup**
 - Linear warmup over first 10 epochs before cosine decay
 - Implemented in `scheduler_utils.py` as `LinearWarmupCosineDecay`
 - Stabilizes early training for transformer components that are sensitive to large initial gradients
 
-#### 6. Layer-wise Learning Rate Decay
-
-- CNN backbone parameters: 0.1x base LR
-- Transformer parameters: 0.5x base LR
-- Detection/classification heads: 1.0x base LR
+**6. Layer-wise Learning Rate Decay**
+- CNN backbone parameters: 0.1× base LR
+- Transformer parameters: 0.5× base LR
+- Detection/classification heads: 1.0× base LR
 - Implemented via `build_param_groups()` in `scheduler_utils.py`
 - Standard DETR practice for fine-tuning pre-trained spatial features
 
-#### 7. Exponential Moving Average (EMA)
-
+**7. Exponential Moving Average (EMA)**
 - Maintains EMA copy of model weights with decay=0.999
 - EMA weights used for evaluation, training weights used for gradient updates
 - Implemented as `ModelEMA` class in `scheduler_utils.py`
-- Typically improves accuracy by 0.5-1% for DETR-style models
+- Typically improves accuracy by 0.5–1% for DETR-style models
+
+#### Additional Bugs Identified (Phase 4)
+
+Through detailed code-to-paper analysis and full label-flow tracing, five additional bugs were identified. These are documented with exact before/after code, traced label-flow tables, and cascading change requirements.
+
+**Bug 18: `sc2od_targets` empty tensor shape crash**
+
+| | |
+|---|---|
+| **File** | `optimization.py`, function `sc2od_targets()` |
+| **Trigger** | CPR volume with no lesions (all healthy sampling points) |
+| **Root cause** | `torch.tensor([])` produces shape `[0]` instead of `[0, 2]`. Downstream, `box_lastdim_expansion` calls `.unsqueeze(-2).expand(...)` which fails on a 1D empty tensor. `HungarianMatcher` also calls `torch.cdist` which requires 2D inputs. |
+| **Fix** | Guard empty case: `torch.zeros((0, 2), dtype=torch.float32)` for boxes and `torch.zeros((0,), dtype=torch.int64)` for labels when the lists are empty. |
+| **Impact** | Prevents crash on any healthy-only sample — essential for real clinical data where many arteries have no lesions. |
+
+**Bug 19: Label offset corruption in dual-task contrastive loss**
+
+| | |
+|---|---|
+| **File** | `optimization.py`, method `dual_task_contrastive_loss._get_sampling_point_classification_targets()` |
+| **Root cause** | The code does `labels = torch.argmax(selected_logits, dim=1) - 1` then `clamp(min=0)`. This systematically corrupts the label mapping between OD and SC conventions. |
+| **Impact** | **Corrupts L_dc, the paper's core contribution.** Traced label flow for all possible predictions (num_classes=3): |
+
+Label corruption trace (before fix):
+
+| OD predicts | argmax | After -1 | After clamp(0) | od2sc +1 | SC target | Correct target | Status |
+|---|---|---|---|---|---|---|---|
+| Class 0 (calcified) | 0 | -1 | 0 | 1 | 1 | 1 | ✅ Coincidental |
+| Class 1 (non-calc) | 1 | 0 | 0 | 1 | 1 | 2 | ❌ Wrong |
+| Class 2 (mixed) | 2 | 1 | 1 | 2 | 2 | 3 | ❌ Wrong |
+| No-object | 3 | 2 | 2 | 3 | 3 | 0 (background) | ❌ Wrong |
+
+The fix filters out no-object predictions entirely and passes 0-indexed class labels directly (without the erroneous -1 offset), since `od2sc_targets` already adds +1 internally.
+
+Label flow after fix:
+
+| OD predicts | argmax | is_object | filtered_label | od2sc +1 | SC target | Status |
+|---|---|---|---|---|---|---|
+| Class 0 | 0 | ✅ kept | 0 | 1 | 1 | ✅ |
+| Class 1 | 1 | ✅ kept | 1 | 2 | 2 | ✅ |
+| Class 2 | 2 | ✅ kept | 2 | 3 | 3 | ✅ |
+| No-object | 3 | ❌ filtered | — | — | 0 (default) | ✅ |
+
+The reverse direction (`_get_object_detection_targets`, SC→OD) was traced and confirmed correct: SC class 0 maps to healthy (skipped), SC classes 1+ map to OD classes 0+ via `label - 1` in `sc2od_targets`.
+
+**Bug 20: Loss function returns scalar instead of component breakdown**
+
+| | |
+|---|---|
+| **File** | `optimization.py`, `spatio_temporal_contrast_loss.forward()` |
+| **Problem** | Returns a single scalar loss. Cannot diagnose which loss term is dominating or exploding during training. |
+| **Fix** | Return a dict `{'total': ..., 'od': ..., 'sc': ..., 'dc': ...}`. Update `train.py` `train_one_epoch()` and `evaluate()` to unpack `loss_dict['total']` for backprop and log components. |
+
+**Bug 21: `detection_targets` in augmentation.py has same empty tensor issue as Bug 18**
+
+| | |
+|---|---|
+| **File** | `augmentation.py`, method `cubic_sequence_data.detection_targets()` |
+| **Problem** | Identical to Bug 18 — `torch.tensor([])` produces wrong shape for empty boxes. |
+| **Fix** | Same guard: `torch.zeros((0, 2))` for empty boxes. |
+
+**Bug 22: Model forward() returns inconsistent number of outputs**
+
+| | |
+|---|---|
+| **File** | `architecture.py`, `spatio_temporal_semantic_learning.forward()` |
+| **Problem** | Returns 2 values when `self.pattern == 'training'` but only 1 value otherwise. Since `self.pattern` is frozen at init time, `model.eval()` does not change the return format — this works by accident but breaks when creating inference/evaluation code with `pattern='testing'`. |
+| **Fix** | Always return both `(od_outputs, sc_outputs)` regardless of pattern. The Softmax on/off behavior is already handled inside the sub-module forward methods via their own pattern checks. |
 
 ---
 
@@ -179,41 +242,63 @@ Seven advanced training features were implemented:
 
 ### Input Pipeline
 
-- Input: 256x64x64 NIfTI CT volumes (coronary artery cross-sections along centerline)
-- HU windowing: window_lw=[300, 900] producing range [-150, 750]
-- Cubic sequence extraction: 32 cubes of size 3x16x16 sampled along the vessel
+- Input: 256×64×64 NIfTI CT volumes (coronary artery CPR volumes along centerline)
+- HU windowing: `window_lw=[300, 900]` producing range [-150, 750], normalized to [0, 1]
+- Two input representations extracted from each CPR volume:
+  - **Spatial branch:** Full 3D volume (256×64×64) + 4 primary 2D views (256×64) extracted along sagittal, coronal, and two diagonal axes
+  - **Temporal branch:** 32 cubes of size 25×25×25 sampled uniformly at 8-voxel intervals along the centerline
 
-### Temporal Branch
+### Temporal Branch (Sampling-Point Classification)
 
-1. 3D cube selection from input volume
-2. 4-level CNN feature extraction (3D convolutions)
-3. Transformer encoder (4 layers) processes temporal sequence
-4. Transformer decoder (4 layers) with learned queries
-5. Per-sampling-point classification head
+1. **3D cube extraction:** `_3d_cubes_selection` extracts 32 cubes from input volume → `[B, 32, 25, 25, 25]`
+2. **Shallow 3D-CNN:** 4-level Conv3d (1→16→32→64→128) with BN+ReLU+MaxPool per level, processing each cube independently via batch reshaping → `[B, 32, 128, D', H', W']`
+3. **Flattening + projection:** Conv3d(128→32, 1×1) reduces channels, flatten spatial dims, linear project to 512 → `[B, 32, 512]`
+4. **Transformer encoder:** 4 layers, 8 heads, dropout=0.1. Self-attention across 32 positions captures multi-location temporal dependencies → `[B, 32, 512]`
+5. **Classification head:** MLP(512→128→num_classes+1) per sampling point. Softmax applied only during inference. → `[B, 32, num_classes+1]`
 
-### Spatial Branch
+### Spatial Branch (Object Detection)
 
-1. 4-level 3D + 2D CNN with learnable fusion weights
-2. Spatial flattening: Conv3d(128->16) then linear projection to 512-dim tokens
-3. Transformer encoder/decoder (shared architecture with temporal branch)
-4. DETR-style detection head with Hungarian matching
+1. **Multi-view feature extraction:** 4-level interleaved 3D and 2D extraction blocks:
+   - Level 0: Both 3D-CNN and 2D-CNN process raw input independently
+   - Levels 1–3: 2D branch extracts 4 views from current 3D features, processes with 2D convolutions, lifts back to 3D via weighted broadcast; 3D branch processes features with 3D convolutions; results fused with learnable weights (`_3d_weight * x_3d + (1 - _3d_weight) * x_2d`)
+   - Output: `[B, 128, 16, 4, 4]`
+2. **Spatial flattening:** Conv3d(128→16, 1×1) reduces channels, then `nn.Linear(256, 512)` projects flattened spatial dims → `[B, 16, 512]` (16 channel-wise tokens, each a linear combination of all 256 spatial positions)
+3. **Transformer decoder:** `nn.Transformer` with 4 encoder + 4 decoder layers. 16 learned query embeddings (`nn.Embedding`) cross-attend to 16 spatial tokens → `[B, 16, 512]`
+4. **Detection heads:** Two parallel MLPs per query:
+   - Class head: MLP(512→256→num_classes+1) + Softmax (inference only)
+   - Box head: MLP(512→256→2) + Sigmoid → `[center, width]` in [0, 1]
+
+**Note on 2D/3D stream architecture:** The current implementation feeds 3D features into the 2D branch at levels 1+, meaning the 2D views are extracted from progressively refined 3D features rather than from raw projections. The paper describes independent parallel paths that fuse after extraction. This architectural divergence is a potential improvement target (see Future Work).
 
 ### Loss Function
 
-The composite `spatio_temporal_contrast_loss` has three terms:
+The composite `spatio_temporal_contrast_loss` (Eq. 3) has three terms:
 
-| Loss Term | Weight | Purpose |
-|-----------|--------|---------|
-| Object detection loss | 1.0 | Hungarian matching + cross-entropy + L1 + GIoU for bounding boxes |
-| Sampling point classification loss | 1.0 | Cross-entropy for per-point class labels |
-| Dual-task contrastive loss | 0.5 | Cross-supervision with detached gradients between branches |
+| Loss Term | Paper Eq. | Weight | Purpose |
+|-----------|-----------|--------|---------|
+| `L_od` (Object detection loss) | Eq. 4–5 | 1.0 | Hungarian matching → CE on classes + L1 + GIoU on boxes. No-object class downweighted by `eos_coef=0.2` |
+| `L_sc` (Sampling point classification loss) | Eq. 6 | 1.0 | Cross-entropy over flattened `[B×32, C]` logits vs per-point labels |
+| `L_dc` (Dual-task contrastive loss) | Eq. 7 | `delta` (default 1.0) | Each branch's **detached** predictions converted to pseudo-targets for the other via `C(·)` / `C⁻¹(·)` transforms |
+
+Transform functions:
+- `C(·)` = `sc2od_targets`: Converts per-point SC predictions → contiguous ROI boxes with categories
+- `C⁻¹(·)` = `od2sc_targets`: Converts OD box predictions → per-point label array of length 32
+
+### Two-Stage Training Protocol
+
+| Stage | num_classes | Data | Supervision |
+|-------|-------------|------|-------------|
+| Pre-training | 3 | Augmented set `A` (CDA output) | Plaque composition only (calcified / non-calcified / mixed) |
+| Fine-tuning | 6 | Clinical data `B` | Plaque composition × stenosis degree |
+
+The pre-training stage uses clinically-credible data augmentation (Eq. 1) which pastes lesion foreground ROIs onto healthy vessel backgrounds. Because different coronary segments have different diameters, augmented data only evaluates plaque composition — stenosis degree labels would be unreliable on synthetic combinations.
 
 ### Classification Targets
 
-| Mode | num_classes | Task |
-|------|-------------|------|
-| Pre-training | 3 | Plaque composition (no plaque, calcified, non-calcified/mixed) |
-| Fine-tuning | 6 | Stenosis degree (normal, mild, moderate) x plaque composition |
+| Mode | num_classes | Classes |
+|------|-------------|---------|
+| Pre-training | 3 | Plaque composition: calcified, non-calcified, mixed |
+| Fine-tuning | 6 | Stenosis × plaque: {non-significant, significant} × {calcified, non-calcified, mixed} |
 
 ---
 
@@ -223,21 +308,21 @@ The composite `spatio_temporal_contrast_loss` has three terms:
 
 - 22 checkpoints available in `checkpoints/` (every 10 epochs from epoch 9 to 199, plus `best_model.pth` and `final_model.pth`)
 - Trained in `pre_training` mode (num_classes=3)
-- Loss trajectory on dummy data: 10.1 -> 3.9 over 200 epochs
+- Loss trajectory on dummy data: 10.1 → 3.9 over 200 epochs
 - Fine-tuning checkpoint (num_classes=6) needed for full clinical evaluation
 
 ### Dataset
 
 - Test set: 665 samples (NIfTI volumes + label text files) in `dataset/test/`
 - Arteries covered: LAD, LCX, RCA, D1, D2, OM1, OM2, RI, RPDA, RPLB
-- Multiple data preparation scripts for different volume sizes (30x30x20, 30x30x30, 40x40x40)
+- Multiple data preparation scripts for different volume sizes (30×30×20, 30×30×30, 40×40×40)
 - CSV files for train/val/test splits across 26 patient batches
 
 ### Environment
 
 - Python venv at `.venv/`
 - PyTorch 2.5.1+cu121
-- Hardware: 2x NVIDIA RTX 3090
+- Hardware: 2× NVIDIA RTX 3090
 - Dependencies: torch, torchvision, einops, nibabel, scipy, numpy, scikit-learn, packaging
 
 ---
@@ -284,12 +369,12 @@ The composite `spatio_temporal_contrast_loss` has three terms:
 | `dataset/datapreparation_02mm.py` | Base data preparation script (0.2mm resolution) |
 | `dataset/datapreparation_severe_refine_02mm.py` | Refined preparation focusing on severe stenosis cases |
 | `dataset/datapreparation_severe_refine_aug_02mm.py` | Data preparation with augmentation |
-| `dataset/datapreparation_severe_refine_02mm_303020.py` | Preparation for 30x30x20 volume size |
-| `dataset/datapreparation_severe_refine_02mm_303030.py` | Preparation for 30x30x30 volume size |
-| `dataset/datapreparation_severe_refine_02mm_303030_search.py` | Search variant for 30x30x30 volumes |
-| `dataset/datapreparation_severe_refine_02mm_404040.py` | Preparation for 40x40x40 volume size |
-| `dataset/datapreparation_severe_refine_02mm_404040_search.py` | Search variant for 40x40x40 volumes |
-| `dataset/datapreparation_severe_refine_02mm_404040_less.py` | Reduced preparation for 40x40x40 volumes |
+| `dataset/datapreparation_severe_refine_02mm_303020.py` | Preparation for 30×30×20 volume size |
+| `dataset/datapreparation_severe_refine_02mm_303030.py` | Preparation for 30×30×30 volume size |
+| `dataset/datapreparation_severe_refine_02mm_303030_search.py` | Search variant for 30×30×30 volumes |
+| `dataset/datapreparation_severe_refine_02mm_404040.py` | Preparation for 40×40×40 volume size |
+| `dataset/datapreparation_severe_refine_02mm_404040_search.py` | Search variant for 40×40×40 volumes |
+| `dataset/datapreparation_severe_refine_02mm_404040_less.py` | Reduced preparation for 40×40×40 volumes |
 
 ### Training Artifacts
 
@@ -297,7 +382,7 @@ The composite `spatio_temporal_contrast_loss` has three terms:
 |------|-------------|
 | `checkpoints/best_model.pth` | Best model by validation loss during pre-training |
 | `checkpoints/final_model.pth` | Final model after 200 epochs of pre-training |
-| `checkpoints/checkpoint_epoch_*.pth` | Periodic checkpoints every 10 epochs (20 files, epochs 9-199) |
+| `checkpoints/checkpoint_epoch_*.pth` | Periodic checkpoints every 10 epochs (20 files, epochs 9–199) |
 
 ---
 
@@ -327,20 +412,232 @@ Training was impossible:
 - Non-deterministic query embeddings prevented convergence
 - Circular gradient flow in contrastive loss
 
-### After Fixes
+### After Phase 2 Fixes
 
 - Full training pipeline runs end-to-end on GPU
-- Loss decreases consistently (10.1 -> 3.9 on dummy data, 200 epochs)
+- Loss decreases consistently (10.1 → 3.9 on dummy data, 200 epochs)
 - Both branches have trainable parameters and receive correct gradients
-- Contrastive loss provides correct cross-task supervision without gradient leakage
+- Contrastive loss provides cross-task supervision without gradient leakage
 - Hungarian matching produces correct assignments with consistent box format
 
-### With Training Enhancements
+### After Phase 4 Enhancements
 
-- AMP reduces memory usage, provides approximately 1.5-2x training speedup
+- AMP reduces memory usage, provides approximately 1.5–2× training speedup
 - DDP enables multi-GPU training across both RTX 3090s
 - Online augmentation improves generalization on small medical imaging datasets
 - LR warmup (10 epochs linear) stabilizes early transformer training
-- Layer-wise LR decay (backbone 0.1x, transformer 0.5x, heads 1.0x) preserves pre-trained features
+- Layer-wise LR decay (backbone 0.1×, transformer 0.5×, heads 1.0×) preserves pre-trained features
 - EMA (decay=0.999) provides smoothed weight copy for evaluation
 - Per-epoch metrics (accuracy, precision, recall, F1, specificity) enable training monitoring
+
+### Pending (Bugs 18–22)
+
+The five additional bugs identified through code-to-paper analysis have been fully documented with exact fix specifications but are not yet applied to the codebase. The most critical is **Bug 19** (label offset corruption in L_dc) which silently corrupts the dual-task contrastive loss — the paper's core novelty — by shifting all class labels and conflating distinct lesion types. Once these fixes are applied, the contrastive supervision will provide correct cross-task pseudo-labels for the first time.
+
+---
+
+## Proposed Improvements
+
+This section details specific improvements we are implementing beyond the original SC-Net paper, categorized by priority tier. Each improvement includes rationale specific to SC-Net's architecture, implementation approach, and expected impact.
+
+---
+
+### Tier 1: Correctness Fixes (Bugs 18–22)
+
+These must be applied before any meaningful training run. See the Phase 4 bug descriptions above for full details.
+
+| # | Fix | File(s) | Why It Matters |
+|---|-----|---------|----------------|
+| 18 | `sc2od_targets` empty tensor shape | `optimization.py` | Crashes on healthy-only arteries — common in real clinical data |
+| 19 | Label offset in contrastive loss | `optimization.py` | L_dc provides systematically wrong pseudo-labels, corrupting the paper's core novelty |
+| 20 | Loss component dict return | `optimization.py`, `train.py` | Cannot diagnose training issues without seeing L_od / L_sc / L_dc individually |
+| 21 | `detection_targets` empty tensor | `augmentation.py` | Same crash path as Bug 18, triggered during data loading |
+| 22 | Consistent forward() outputs | `architecture.py` | Prevents eval/inference code from breaking on mismatched return values |
+
+Additionally: update data split from 80/20 to 70/15/15 in `augmentation.py`, `config.py`, and `framework.py` to match the paper's evaluation protocol (§3.1).
+
+---
+
+### Tier 2: Training Infrastructure Improvements
+
+These improvements address training stability, speed, and monitoring. They are already implemented in the codebase (Phase 4) but are described here in detail.
+
+#### 2.1 Mixed-Precision Training (AMP)
+
+**What:** Automatic mixed precision uses float16 for forward/backward passes and float32 for weight updates, managed by `torch.amp.GradScaler` and `torch.amp.autocast`.
+
+**Why it matters for SC-Net:** The model has substantial compute in both the 3D CNN branches (processing 256×64×64 volumes and 32 cubes of 25³) and the Transformer attention layers (16 queries × 16 spatial tokens, 32 temporal tokens). These operations benefit heavily from float16 throughput on RTX 3090 Tensor Cores. With a batch size of only 2 (constrained by 3D volume memory), reducing per-sample memory allows either larger batches or headroom for gradient accumulation.
+
+**Implementation:** Wrap the forward pass + loss computation in `torch.amp.autocast('cuda')`, scale the loss with `GradScaler` before `.backward()`, unscale before gradient clipping, and step through the scaler. Enabled via `--amp` flag in `train.py`.
+
+**Expected impact:** ~1.5–2× wall-clock speedup per epoch. ~30–40% reduction in GPU memory usage.
+
+#### 2.2 Multi-GPU Training (DDP)
+
+**What:** `DistributedDataParallel` wraps the model so that each GPU processes a different subset of the batch, gradients are synchronized via all-reduce, and each GPU maintains identical weights.
+
+**Why it matters for SC-Net:** With batch size 2 and 200 epochs, training is slow on a single GPU. The codebase already has distributed utilities (`get_world_size`, `init_distributed_mode`, `setup_for_distributed` in `functions.py`) but they were never wired into the training loop. With 2× RTX 3090 available, DDP effectively doubles throughput.
+
+**Implementation:** Detect distributed environment via `RANK`/`WORLD_SIZE` env vars (set by `torchrun`). Initialize process group, wrap model in `DDP`, use `DistributedSampler` for the training dataloader, and synchronize metrics via `reduce_dict`. Launch: `torchrun --nproc_per_node=2 train.py`.
+
+**Expected impact:** ~2× training speed with 2 GPUs. Effective batch size doubles from 2 to 4 without increasing per-GPU memory.
+
+#### 2.3 Learning Rate Warmup
+
+**What:** Linear warmup gradually increases the learning rate from 0 to the target LR over the first N epochs, before the cosine annealing decay begins.
+
+**Why it matters for SC-Net:** The Transformer components (both the temporal encoder and the spatial encoder-decoder) are sensitive to large gradient updates early in training when attention weights are randomly initialized. Without warmup, the initial high learning rate can cause attention collapse (all queries attending to the same spatial position) or exploding gradients in the LayerNorm layers. This is standard practice for DETR-style architectures.
+
+**Implementation:** `LinearWarmupCosineDecay` scheduler in `scheduler_utils.py`. For the first `warmup_epochs` (default 10), LR scales linearly from `lr * (epoch+1) / warmup_epochs`. After warmup, standard cosine decay to 0 over the remaining epochs.
+
+**Expected impact:** More stable early training, fewer NaN losses in first 5–10 epochs. Enables higher peak learning rates.
+
+#### 2.4 Layer-wise Learning Rate Decay
+
+**What:** Different parameter groups receive different learning rates. Lower layers (CNN backbone) get smaller LR, higher layers (transformer, detection heads) get larger LR.
+
+**Why it matters for SC-Net:** During fine-tuning (stage 2), the CNN backbone has already learned useful spatial features from pre-training. Applying the same high LR to the backbone as to the new classification heads would destroy these features. This is especially critical for SC-Net because the fine-tuning stage changes `num_classes` from 3 to 6, meaning the classification heads are randomly re-initialized while the backbone should be preserved.
+
+**Implementation:** `build_param_groups()` in `scheduler_utils.py` inspects parameter names and assigns:
+- CNN backbone (`_3d_extraction_blocks`, `_2d_extraction_blocks`, `_3dcnn`): 0.1× base LR
+- Transformer layers (`transformer_architecture`, `temporal_correlation_analysis`): 0.5× base LR
+- Detection/classification heads (`object_detection`, `softmax_classify`, `flattening_projection`): 1.0× base LR
+
+**Expected impact:** Better preservation of pre-trained features during fine-tuning. Reduces overfitting of the backbone to the small fine-tuning dataset.
+
+#### 2.5 Exponential Moving Average (EMA)
+
+**What:** Maintains a shadow copy of model weights that is an exponential moving average of the training weights: `shadow = decay * shadow + (1 - decay) * current_weights`. The EMA weights are used for evaluation; the training weights receive gradient updates.
+
+**Why it matters for SC-Net:** With only 218 patients (paper dataset) or 665 test samples (current dataset), training on such small data produces noisy weight updates. EMA smooths out this noise, producing a more stable model for evaluation without changing the training dynamics. This is standard for DETR and its variants (Deformable DETR, DINO-DETR all use EMA).
+
+**Implementation:** `ModelEMA` class in `scheduler_utils.py`. After each optimizer step, call `ema.update(model)`. Before validation, swap in EMA weights; after validation, swap back. Decay is 0.999, meaning each EMA update retains 99.9% of the previous shadow and 0.1% of the current weights.
+
+**Expected impact:** Typically 0.5–1% improvement in all metrics (ACC, F1, Spec) at essentially zero computational cost.
+
+#### 2.6 Online Data Augmentation
+
+**What:** Random transformations applied to training samples on-the-fly during data loading, producing different augmented versions of each sample every epoch.
+
+**Why it matters for SC-Net:** The paper's Clinically-credible Data Augmentation (CDA) is an *offline* procedure that runs once before training. It increases lesion diversity by pasting foregrounds onto backgrounds, but each augmented sample is fixed once generated. Online augmentation provides *additional* variation every epoch, which is critical when the training set is small. The paper explicitly positions SC-Net as a data-efficient learning method — maximizing the information extracted from limited samples is the entire goal.
+
+**Implementation:** Three augmentations added to `cubic_sequence_data.__getitem__()`, each applied with 50% probability:
+- **Random rotation (±15°):** Rotates the CPR volume around the vessel axis. Uses `scipy.ndimage.rotate` with bilinear interpolation. Simulates natural variation in vessel orientation across patients.
+- **Intensity jitter (±50 HU):** Adds a random uniform offset to all voxel values before normalization. Simulates scanner calibration differences and contrast agent concentration variation between clinical sites.
+- **Random depth flip:** Reverses the volume along the depth (centerline) axis and correspondingly reverses the label array. Simulates the arbitrary choice of proximal→distal vs. distal→proximal ordering.
+
+**Expected impact:** Reduced overfitting, improved generalization. Especially impactful at lower data volumes (25%, 50% training data).
+
+#### 2.7 Per-Epoch Evaluation Metrics
+
+**What:** During training, compute clinical evaluation metrics on the validation set after each epoch, not just validation loss.
+
+**Why it matters for SC-Net:** Validation loss (the composite L_overall) is a proxy for model quality, but the paper reports clinical metrics: Accuracy, Precision, Recall, F1, and Specificity at artery-level for both stenosis degree and plaque composition. Loss can decrease while clinically relevant metrics stagnate or even degrade (e.g., the model gets better at detecting common lesion types while getting worse at rare ones). Tracking actual metrics enables better model selection and early stopping.
+
+**Implementation:** After each validation epoch, convert model outputs to artery-level predictions (same logic as `eval.py`), compute confusion matrix, derive per-class TP/FP/FN/TN, and log macro-averaged metrics.
+
+**Expected impact:** Better model selection (checkpoint with best F1 rather than best loss). Earlier detection of class-specific degradation.
+
+---
+
+### Tier 3: Model Architecture Improvements
+
+These are improvements to the model itself that go beyond what the paper describes. They are planned but not yet implemented.
+
+#### 3.1 True Parallel 2D/3D Feature Streams
+
+**What:** Restructure `feature_extraction_3d` so that the 2D and 3D branches process their inputs independently through all 4 levels, fusing only at the final level.
+
+**Why:** The paper (Fig. 2) describes independent parallel paths where the 2D views are extracted from the raw CPR volume projections and processed separately. The current implementation feeds 3D features into the 2D branch at levels 1+:
+```python
+for i in range(self.conv_levels):
+    if i == 0:
+        x_3d = self._3d_extraction_blocks[i](x)
+        x_2d = self._2d_extraction_blocks[i](x)   # ← Level 0: independent ✓
+    else:
+        x_2d = self._2d_extraction_blocks[i](x_3d)  # ← Level 1+: 2D gets 3D output ✗
+        x_3d = self._3d_extraction_blocks[i](x_3d)
+        x_3d = self._3d_weight * x_3d + (1 - self._3d_weight) * x_2d
+```
+This means both branches converge to similar representations early on, reducing the diversity of features available for fusion. Independent streams would capture genuinely different information: the 3D branch learns volumetric spatial relationships while the 2D branch learns projection-specific patterns (e.g., vessel wall contrast profiles visible in sagittal view but not coronal).
+
+**Implementation approach:** Maintain a separate 2D feature tensor across levels. At each level, extract new 2D views from the *2D features* (not 3D features), process through 2D convolutions, and only fuse with the 3D stream at the final level using the learnable `_3d_weight`.
+
+**Expected impact:** Potentially significant improvement in feature diversity. The spatial branch would benefit from complementary 2D and 3D perspectives rather than progressively redundant representations.
+
+#### 3.2 Soft Contrastive Labels
+
+**What:** Replace hard `argmax` predictions in L_dc with temperature-scaled soft probability distributions, and use KL divergence instead of cross-entropy for the contrastive loss terms.
+
+**Why:** Currently, L_dc converts each branch's outputs to hard pseudo-labels via `argmax`. Early in training, model predictions are nearly random, so the pseudo-labels are noisy and frequently wrong. Hard labels amplify this noise — a wrong pseudo-label receives the same weight as a correct one. Soft labels distribute the supervision signal across classes proportionally to model confidence, providing gentler gradients that are more robust to prediction errors.
+
+**Implementation approach:**
+```python
+# Instead of:
+labels = torch.argmax(selected_logits, dim=1)
+# Use:
+soft_labels = F.softmax(selected_logits / temperature, dim=1)  # temperature > 1 smooths
+# Then replace CE loss with KL divergence:
+loss = F.kl_div(F.log_softmax(output, dim=1), soft_labels, reduction='batchmean')
+```
+Temperature `τ` controls smoothness: `τ=1` is standard softmax, `τ>1` produces softer distributions. A schedule could anneal `τ` from 3.0 early in training to 1.0 later as predictions become more reliable.
+
+**Expected impact:** More stable L_dc gradients early in training. Reduced risk of confirmation bias (where one branch's early mistakes get reinforced by the other).
+
+#### 3.3 Attention-Based View Fusion
+
+**What:** Replace the fixed weighted averaging in Multi-view Spatial Relationship Analysis (Eq. 2) with a learned cross-attention mechanism that dynamically weights views based on their content.
+
+**Why:** The current implementation learns scalar weights (`_3d_weight`, `_2d_weight`) that are constant across all spatial positions and all samples. But the informativeness of each view depends on the local anatomy — a calcified plaque may be clearly visible in the sagittal view but occluded in the coronal view for a particular vessel segment. Content-dependent attention would allow the model to focus on the most informative view at each spatial location.
+
+**Implementation approach:** Replace the weighted sum with a small cross-attention block where the 3D features are the query and the 4 view features (lifted to 3D) are keys/values. This produces spatially-varying attention weights over views.
+
+**Expected impact:** Better lesion detection in anatomically complex regions where views differ significantly in informativeness.
+
+#### 3.4 Test-Time Augmentation (TTA)
+
+**What:** During inference, run the model multiple times on augmented versions of the same input (flipped, rotated) and average the predictions.
+
+**Why:** This is a low-effort accuracy boost that requires no retraining. For medical imaging where individual predictions have clinical consequences, TTA reduces prediction variance and catches lesions that might be missed in a single orientation.
+
+**Implementation approach:** For each test sample, generate K augmented versions (e.g., original + depth-flipped + 2 rotations = 4 versions). Run inference on all K, reverse the augmentation on the outputs (un-flip boxes, un-rotate coordinates), and average the class probabilities. For boxes, apply NMS or weighted box fusion across the K sets.
+
+**Expected impact:** Typically 1–3% improvement in recall (fewer missed lesions) with modest impact on precision.
+
+---
+
+### Tier 4: Experimental Infrastructure
+
+#### 4.1 Ablation Study Framework
+
+**What:** Implement the ablation experiments from Fig. 4 of the paper to validate that each component contributes to performance.
+
+**Why:** The paper reports four ablations that demonstrate the value of each design choice. Reproducing these validates our implementation and provides a baseline for measuring the impact of our improvements.
+
+**Ablation configurations:**
+
+| Experiment | Config Change | What It Tests |
+|---|---|---|
+| Without CDA (Fig. 4a) | Skip pre-training, train directly on clinical data | Value of clinically-credible data augmentation |
+| Without SOD (Fig. 4b) | Disable spatial branch, use only temporal branch | Value of spatial semantic learning |
+| Without TSC (Fig. 4b) | Disable temporal branch, use only spatial branch | Value of temporal semantic learning |
+| Without L_dc (Fig. 4c) | Set `delta=0` in loss function | Value of dual-task contrastive optimization |
+| Data volume sweep | Train with 25% / 50% / 75% / 100% of training data | Data efficiency curve |
+
+**Implementation:** Create config files for each ablation. For branch removal, add flags to `spatio_temporal_semantic_learning` to disable one branch and return dummy outputs. For L_dc removal, `delta=0` already works.
+
+#### 4.2 Cross-Validation
+
+**What:** K-fold cross-validation instead of a single fixed train/val/test split.
+
+**Why:** With only 218 patients (paper) or ~665 arteries (current dataset), a single split may not be representative. Results can vary significantly depending on which patients end up in the test set. 5-fold cross-validation provides confidence intervals and more reliable performance estimates.
+
+**Implementation:** Split at the patient level (not artery level) to prevent data leakage between folds. Report mean ± standard deviation across folds.
+
+#### 4.3 TensorBoard Integration
+
+**What:** Log training metrics, loss curves, learning rate schedules, gradient norms, and sample predictions to TensorBoard.
+
+**Why:** Currently training only prints to stdout. Visual inspection of loss curves, gradient distributions, and attention maps is essential for diagnosing training issues (e.g., attention collapse, gradient explosion in one branch, L_dc dominating the total loss).
+
+**Implementation:** Add `SummaryWriter` to `train.py`. Log per-epoch: total loss + components (L_od, L_sc, L_dc), validation metrics (ACC, F1, Spec), learning rate, gradient L2 norm. Optionally: sample predictions overlaid on CPR volumes for visual inspection.
