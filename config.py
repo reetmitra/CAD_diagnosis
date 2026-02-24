@@ -5,7 +5,7 @@ class DefaultConfig(object):
         "pretrain_data_root": r'augmented_data_root',
         "finetune_data_root": r'clinical_data_root',
         "eos_coef": 0.2,
-        "train_ratio": 0.8,
+        "train_ratio": 0.7,  # 70/15/15 split (train/validation/test)
         "window_lw": [300, 900],
         "batch_size": 2
     }

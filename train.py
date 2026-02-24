@@ -70,7 +70,8 @@ def train_one_epoch(model, loss_fn, dataloader, optimizer, device, epoch,
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         od_outputs, sc_outputs = model(images)
-        loss = loss_fn(od_outputs, sc_outputs, targets)
+        loss_dict = loss_fn(od_outputs, sc_outputs, targets)
+        loss = loss_dict['total']
 
         optimizer.zero_grad()
         loss.backward()
@@ -86,7 +87,9 @@ def train_one_epoch(model, loss_fn, dataloader, optimizer, device, epoch,
         if (batch_idx + 1) % print_every == 0:
             avg_loss = total_loss / num_batches
             print(f"  Epoch [{epoch}] Batch [{batch_idx + 1}/{len(dataloader)}] "
-                  f"Loss: {loss.item():.4f} Avg: {avg_loss:.4f}")
+                  f"Loss: {loss.item():.4f} (OD: {loss_dict['od'].item():.4f} "
+                  f"SC: {loss_dict['sc'].item():.4f} DC: {loss_dict['dc'].item():.4f}) "
+                  f"Avg: {avg_loss:.4f}")
 
     return total_loss / max(num_batches, 1)
 
@@ -102,9 +105,9 @@ def evaluate(model, loss_fn, dataloader, device):
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         od_outputs, sc_outputs = model(images)
-        loss = loss_fn(od_outputs, sc_outputs, targets)
+        loss_dict = loss_fn(od_outputs, sc_outputs, targets)
 
-        total_loss += loss.item()
+        total_loss += loss_dict['total'].item()
         num_batches += 1
 
     return total_loss / max(num_batches, 1)

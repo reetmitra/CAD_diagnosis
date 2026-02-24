@@ -115,9 +115,14 @@ class cubic_sequence_data(data.Dataset):
         self.labels_file_list = sorted(self.labels_file_list)
         self.file_total = len(self.volumes_file_list)
         if pattern == 'training':
-            self.data_start, self.data_end = 0, int(self.file_total * train_ratio)
-        else :
-            self.data_start, self.data_end = int(self.file_total * train_ratio), self.file_total
+            self.data_start = 0
+            self.data_end = int(self.file_total * train_ratio)
+        elif pattern == 'validation':
+            self.data_start = int(self.file_total * train_ratio)
+            self.data_end = int(self.file_total * (train_ratio + (1 - train_ratio) / 2))
+        else:  # 'testing'
+            self.data_start = int(self.file_total * (train_ratio + (1 - train_ratio) / 2))
+            self.data_end = self.file_total
         self.length = self.data_end - self.data_start
         return
 
@@ -166,8 +171,12 @@ class cubic_sequence_data(data.Dataset):
             boxes.append([center, width])
             labels.append(label - 1)
 
-        labels = torch.tensor(labels, dtype=torch.int64)
-        boxes = torch.tensor(boxes, dtype=torch.float32)
+        if len(boxes) == 0:
+            boxes = torch.zeros((0, 2), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.int64)
+        else:
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            labels = torch.tensor(labels, dtype=torch.int64)
         return {"labels": labels, "boxes": boxes}
 
     def __getitem__(self, index):

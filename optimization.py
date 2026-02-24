@@ -159,8 +159,12 @@ def sc2od_targets(sc_point_data, seq_length):
             boxes.append([center, width])
             labels.append(label - 1)
 
-        boxes = torch.tensor(boxes)
-        labels = torch.tensor(labels)
+        if len(boxes) == 0:
+            boxes = torch.zeros((0, 2), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.int64)
+        else:
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            labels = torch.tensor(labels, dtype=torch.int64)
 
         od_box_data.append({"labels": labels, "boxes": boxes})
     return od_box_data
@@ -199,9 +203,15 @@ class dual_task_contrastive_loss(nn.Module):
             boxes = od_outputs["pred_boxes"][batch_idx]
             selected_logits = logits[indices]
             selected_boxes = boxes[indices][:, [0, 2]]
-            labels = torch.argmax(selected_logits, dim=1) - 1
-            labels = torch.clamp(labels, min=0)
-            ret_od_targets.append({"labels": labels, "boxes": selected_boxes})
+            pred_classes = torch.argmax(selected_logits, dim=1)
+
+            # Filter out no-object predictions (class index == num_classes)
+            num_classes = selected_logits.shape[-1] - 1  # last class is no-object
+            is_object = pred_classes < num_classes
+            filtered_labels = pred_classes[is_object]
+            filtered_boxes = selected_boxes[is_object]
+
+            ret_od_targets.append({"labels": filtered_labels, "boxes": filtered_boxes})
 
         return od2sc_targets(ret_od_targets, self.seq_length)
 
@@ -239,7 +249,14 @@ class spatio_temporal_contrast_loss(nn.Module):
         od_targets_od = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         od_targets_sc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
 
-        ret_loss = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * delta
-        ret_loss += self.od_loss(od_outputs, od_targets_od)
-        ret_loss += self.sc_loss(sc_outputs, od2sc_targets(od_targets_sc, self.seq_length))
-        return ret_loss
+        dc_loss_val = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * delta
+        od_loss_val = self.od_loss(od_outputs, od_targets_od)
+        sc_loss_val = self.sc_loss(sc_outputs, od2sc_targets(od_targets_sc, self.seq_length))
+        total_loss = dc_loss_val + od_loss_val + sc_loss_val
+
+        return {
+            'total': total_loss,
+            'od': od_loss_val,
+            'sc': sc_loss_val,
+            'dc': dc_loss_val
+        }

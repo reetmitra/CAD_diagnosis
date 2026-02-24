@@ -49,7 +49,7 @@ class sc_net_framework:
             self.batch_size = opt.data_params["batch_size"]
 
             self.loss_fn = self.get_loss_fn()
-            self.dataLoader_train, self.dataLoader_eval = self.get_dataloader()
+            self.dataLoader_train, self.dataLoader_eval, self.dataLoader_test = self.get_dataloader()
 
     def get_model(self):
         return spatio_temporal_semantic_learning(
@@ -91,6 +91,12 @@ class sc_net_framework:
             train_ratio=self.train_ratio,
             input_shape=self.input_shape,
             window=self.window_lw)
+        dataset_validation = aug.cubic_sequence_data(
+            dataset_root=self.data_root,
+            pattern='validation',
+            train_ratio=self.train_ratio,
+            input_shape=self.input_shape,
+            window=self.window_lw)
         dataset_testing = aug.cubic_sequence_data(
             dataset_root=self.data_root,
             pattern='testing',
@@ -98,6 +104,7 @@ class sc_net_framework:
             input_shape=self.input_shape,
             window=self.window_lw)
         return DataLoader(dataset_training, batch_size=self.batch_size, shuffle=True, collate_fn=aug.collate_fn),\
+               DataLoader(dataset_validation, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn),\
                DataLoader(dataset_testing, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn)
 
     def pre_training_load(self):
