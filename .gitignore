@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Model checkpoints and outputs
+checkpoints/
+*.pth
+*.ckpt
+*.pt
+
+# Data directories
+dataset/
+dummy_data/
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
