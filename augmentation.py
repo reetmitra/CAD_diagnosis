@@ -9,7 +9,7 @@ import nibabel as nib
 from torch.utils import data
 from torch.utils.data import DataLoader
 import numpy as np
-from scipy.ndimage import zoom
+from scipy.ndimage import zoom, rotate
 
 from architecture import spatio_temporal_semantic_learning
 import functions as funcs
@@ -102,12 +102,43 @@ class clinically_credible_augmentation(nn.Module):
         return
 
 
+def online_augment(volume, labels):
+    """Apply random online augmentations to a numpy volume and labels array.
+
+    Args:
+        volume: numpy array of shape [D, H, W]
+        labels: numpy array of shape [D]
+
+    Returns:
+        Augmented volume and labels (numpy arrays).
+    """
+    # Random rotation along vessel axis (Z) — same angle for all axial slices
+    if random.random() < 0.5:
+        angle = random.uniform(-15, 15)
+        for d in range(volume.shape[0]):
+            volume[d] = rotate(volume[d], angle, reshape=False, order=1)
+
+    # Intensity jitter — uniform offset in [-50, +50] HU
+    if random.random() < 0.5:
+        offset = random.uniform(-50, 50)
+        volume = volume + offset
+
+    # Random flip along depth (axis 0), also reverse labels
+    if random.random() < 0.5:
+        volume = np.flip(volume, axis=0).copy()
+        labels = np.flip(labels, axis=0).copy()
+
+    return volume, labels
+
+
 class cubic_sequence_data(data.Dataset):
-    def __init__(self, dataset_root, pattern='training', train_ratio=0.8, input_shape=[256,64,64], window=[300, 900]):
+    def __init__(self, dataset_root, pattern='training', train_ratio=0.8, input_shape=[256,64,64], window=[300, 900], augment=False):
 
         self.volumes_root = os.path.join(dataset_root, 'volumes/')
         self.labels_root = os.path.join(dataset_root, 'labels/')
         self.input_shape, self.window = input_shape, [window[0] - window[1] / 2, window[0] + window[1] / 2]
+        self.augment = augment
+        self.pattern = pattern
 
         self.volumes_file_list = os.listdir(self.volumes_root)
         self.volumes_file_list = sorted(self.volumes_file_list)
@@ -185,6 +216,8 @@ class cubic_sequence_data(data.Dataset):
         volumes_file = os.path.join(self.volumes_root, self.volumes_file_list[actual_index])
         labels_file = os.path.join(self.labels_root, self.labels_file_list[actual_index])
         ret_volumes, ret_labels = self.read_data(volumes_file, labels_file)
+        if self.augment and self.pattern == 'training':
+            ret_volumes, ret_labels = online_augment(ret_volumes, ret_labels)
         ret_volumes = funcs.normalize_ct_data(ret_volumes, hu_min=self.window[0], hu_max=self.window[1])
         return {'image': torch.tensor(ret_volumes,dtype=torch.float32), 'target': self.detection_targets(ret_labels)}
 
