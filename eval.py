@@ -13,6 +13,7 @@ Usage:
   python eval.py --checkpoint ./checkpoints/best_model.pth --pattern fine_tuning
   python eval.py --checkpoint ./checkpoints/pretrain.pth --pattern pre_training --data_root ./test_data
   python eval.py --checkpoint ./checkpoints/best_model.pth --pattern fine_tuning --eval_sc --batch_size 4
+  python eval.py --checkpoint ./checkpoints/best_model.pth --pattern fine_tuning --tta --tta_k 5
 """
 
 import argparse
@@ -41,6 +42,10 @@ def parse_args():
                         help='Batch size for evaluation (default: 2)')
     parser.add_argument('--eval_sc', action='store_true',
                         help='Also evaluate the sampling point classification branch')
+    parser.add_argument('--tta', action='store_true',
+                        help='Enable test-time augmentation')
+    parser.add_argument('--tta_k', type=int, default=5,
+                        help='Number of augmented versions for TTA (default: 5)')
     return parser.parse_args()
 
 
@@ -48,6 +53,132 @@ def get_device(device_str):
     if device_str == 'auto':
         return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     return torch.device(device_str)
+
+
+def tta_augment(volume, tta_k):
+    """Generate TTA-augmented versions of a volume tensor.
+
+    All transforms are normalization-invariant (work on already-normalized data).
+
+    Args:
+        volume: tensor of shape [D, H, W] (single sample, already normalized)
+        tta_k: maximum number of augmented versions (not counting original)
+
+    Returns:
+        augmented: list of (augmented_volume, needs_depth_flip_reversal) tuples.
+            The original is always first with needs_depth_flip_reversal=False.
+            Length is min(tta_k, num_available_transforms) + 1.
+    """
+    augmented = [(volume, False)]  # original, no flip reversal needed
+
+    # Define the pool of transforms: (transform_fn, is_depth_flip)
+    transforms = [
+        # 1. Depth flip — reverse along dim 0 (the 256-length axis)
+        (lambda v: torch.flip(v, dims=[0]), True),
+        # 2. Intensity scale +5% (multiplicative, normalization-invariant)
+        (lambda v: v * 1.05, False),
+        # 3. Intensity scale -5% (multiplicative, normalization-invariant)
+        (lambda v: v * 0.95, False),
+        # 4. Intensity shift +0.02 (small additive shift in normalized space)
+        (lambda v: v + 0.02, False),
+        # 5. Intensity shift -0.02
+        (lambda v: v - 0.02, False),
+    ]
+
+    # Extended transforms if tta_k > 5
+    if tta_k > 5:
+        transforms.extend([
+            # 6. Intensity scale +2%
+            (lambda v: v * 1.02, False),
+            # 7. Intensity scale -2%
+            (lambda v: v * 0.98, False),
+            # 8. Combined depth flip + intensity scale +5%
+            (lambda v: torch.flip(v * 1.05, dims=[0]), True),
+            # 9. Intensity shift +0.05
+            (lambda v: v + 0.05, False),
+            # 10. Intensity shift -0.05
+            (lambda v: v - 0.05, False),
+        ])
+
+    # Take up to tta_k transforms
+    for i, (transform_fn, is_flip) in enumerate(transforms):
+        if i >= tta_k:
+            break
+        augmented.append((transform_fn(volume), is_flip))
+
+    return augmented
+
+
+def tta_forward(model, image, tta_k, device):
+    """Run TTA inference on a single sample.
+
+    Averages softmax probabilities for classification logits across
+    the original and K augmented versions. Box predictions come from
+    the original (unaugmented) forward pass only.
+
+    Args:
+        model: SC-Net model (in eval mode)
+        image: tensor of shape [D, H, W] (single sample)
+        tta_k: number of augmented versions
+        device: torch device
+
+    Returns:
+        od_outputs_i: dict with averaged 'pred_logits' [num_queries, C] and
+                       original 'pred_boxes' [num_queries, 2]
+        sc_outputs_i: dict with averaged 'pred_logits' [seq_len, C] or None
+    """
+    augmented_pairs = tta_augment(image, tta_k)
+
+    od_probs_list = []
+    sc_probs_list = []
+    od_boxes_original = None
+    sc_outputs_available = False
+
+    for aug_idx, (aug_volume, is_depth_flip) in enumerate(augmented_pairs):
+        # Run single-sample batch through the model
+        inp = aug_volume.unsqueeze(0).to(device)  # [1, D, H, W]
+        od_out, sc_out = model(inp)
+
+        # OD branch: softmax over class logits
+        od_logits = od_out['pred_logits'][0]  # [num_queries, num_classes+1]
+        od_probs = F.softmax(od_logits, dim=-1)
+        od_probs_list.append(od_probs)
+
+        # Keep boxes from the original (unaugmented) pass only
+        if aug_idx == 0:
+            od_boxes_original = od_out['pred_boxes'][0]  # [num_queries, 2]
+
+        # SC branch
+        if sc_out is not None and 'pred_logits' in sc_out:
+            sc_outputs_available = True
+            sc_logits = sc_out['pred_logits'][0]  # [seq_len, num_classes+1]
+            sc_probs = F.softmax(sc_logits, dim=-1)
+            # For depth-flipped augmentations, flip SC logits back along
+            # the sequence dimension before averaging
+            if is_depth_flip:
+                sc_probs = torch.flip(sc_probs, dims=[0])
+            sc_probs_list.append(sc_probs)
+
+    # Average OD probabilities — convert back to log-space so downstream
+    # code that calls softmax again still produces the same ranking
+    # (softmax of log(p) = p). We store as log-probs.
+    avg_od_probs = torch.stack(od_probs_list, dim=0).mean(dim=0)
+    # Use log to convert averaged probs back to logit-like values.
+    # Clamp to avoid log(0).
+    avg_od_logits = torch.log(avg_od_probs.clamp(min=1e-8))
+
+    od_outputs_i = {
+        'pred_logits': avg_od_logits,
+        'pred_boxes': od_boxes_original,
+    }
+
+    sc_outputs_i = None
+    if sc_outputs_available and len(sc_probs_list) > 0:
+        avg_sc_probs = torch.stack(sc_probs_list, dim=0).mean(dim=0)
+        avg_sc_logits = torch.log(avg_sc_probs.clamp(min=1e-8))
+        sc_outputs_i = {'pred_logits': avg_sc_logits}
+
+    return od_outputs_i, sc_outputs_i
 
 
 def compute_metrics(y_true, y_pred, num_classes):
@@ -235,7 +366,8 @@ def _build_sc_point_labels(targets_i, seq_length):
 
 
 @torch.no_grad()
-def evaluate(model, test_loader, device, num_classes, eval_sc=False):
+def evaluate(model, test_loader, device, num_classes, eval_sc=False,
+             tta=False, tta_k=5):
     """Run evaluation on test set.
 
     Args:
@@ -244,6 +376,8 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False):
         device: torch device
         num_classes: number of object classes (3 or 6)
         eval_sc: if True, also evaluate sampling point classification branch
+        tta: if True, enable test-time augmentation
+        tta_k: number of augmented versions for TTA (default 5)
 
     Returns:
         stenosis_metrics: dict of stenosis classification metrics
@@ -261,52 +395,78 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False):
     sc_correct = 0
     sc_total = 0
 
-    print("\nRunning inference on test set...")
+    if tta:
+        print(f"\nRunning inference on test set with TTA (K={tta_k})...")
+    else:
+        print("\nRunning inference on test set...")
+
     for batch_idx, (images, targets) in enumerate(test_loader):
         images = images.to(device)
-
-        # Forward pass
-        od_outputs, sc_outputs = model(images)
-
-        # Process each sample in the batch
         batch_size = images.shape[0]
-        for i in range(batch_size):
-            # --- Object detection branch ---
-            od_out_i = {
-                'pred_logits': od_outputs['pred_logits'][i],
-                'pred_boxes': od_outputs['pred_boxes'][i]
-            }
-            target_i = targets[i]
 
-            # Convert to artery-level predictions
-            stenosis_pred, plaque_pred = od_predictions_to_artery_level(od_out_i, num_classes)
-            stenosis_gt, plaque_gt = targets_to_artery_level(target_i, num_classes)
+        if tta:
+            # TTA path: process each sample individually
+            for i in range(batch_size):
+                image_i = images[i]   # [D, H, W]
+                target_i = targets[i]
 
-            all_stenosis_preds.append(stenosis_pred)
-            all_stenosis_gts.append(stenosis_gt)
+                od_out_i, sc_out_i = tta_forward(model, image_i, tta_k, device)
 
-            # Only include plaque predictions for samples with plaques in GT
-            if plaque_gt != -1:
-                # Even if pred is -1 (no detection), count it against the GT
-                # by mapping -1 to a dummy class (num_classes) so it counts as wrong
-                effective_plaque_pred = plaque_pred if plaque_pred != -1 else num_classes
-                all_plaque_preds.append(effective_plaque_pred)
-                all_plaque_gts.append(plaque_gt)
-            elif plaque_pred != -1 and plaque_gt == -1:
-                # False positive: predicted plaque on a healthy artery
-                # We still track this for stenosis (already done above)
-                pass
+                # Convert to artery-level predictions
+                stenosis_pred, plaque_pred = od_predictions_to_artery_level(
+                    od_out_i, num_classes)
+                stenosis_gt, plaque_gt = targets_to_artery_level(
+                    target_i, num_classes)
 
-            # --- Sampling point classification branch ---
-            if eval_sc and sc_outputs is not None and 'pred_logits' in sc_outputs:
-                sc_logits_i = sc_outputs['pred_logits'][i]  # [seq_length, num_classes+1]
-                sc_preds_i = sc_logits_i.argmax(dim=-1)     # [seq_length]
+                all_stenosis_preds.append(stenosis_pred)
+                all_stenosis_gts.append(stenosis_gt)
 
-                seq_length = sc_logits_i.shape[0]
-                sc_gt_i = _build_sc_point_labels(target_i, seq_length).to(device)
+                if plaque_gt != -1:
+                    effective_plaque_pred = plaque_pred if plaque_pred != -1 else num_classes
+                    all_plaque_preds.append(effective_plaque_pred)
+                    all_plaque_gts.append(plaque_gt)
 
-                sc_correct += (sc_preds_i == sc_gt_i).sum().item()
-                sc_total += seq_length
+                # SC branch
+                if eval_sc and sc_out_i is not None and 'pred_logits' in sc_out_i:
+                    sc_logits_i = sc_out_i['pred_logits']  # [seq_length, num_classes+1]
+                    sc_preds_i = sc_logits_i.argmax(dim=-1)
+                    seq_length = sc_logits_i.shape[0]
+                    sc_gt_i = _build_sc_point_labels(target_i, seq_length).to(device)
+                    sc_correct += (sc_preds_i == sc_gt_i).sum().item()
+                    sc_total += seq_length
+        else:
+            # Standard (non-TTA) path
+            od_outputs, sc_outputs = model(images)
+
+            for i in range(batch_size):
+                od_out_i = {
+                    'pred_logits': od_outputs['pred_logits'][i],
+                    'pred_boxes': od_outputs['pred_boxes'][i]
+                }
+                target_i = targets[i]
+
+                stenosis_pred, plaque_pred = od_predictions_to_artery_level(
+                    od_out_i, num_classes)
+                stenosis_gt, plaque_gt = targets_to_artery_level(
+                    target_i, num_classes)
+
+                all_stenosis_preds.append(stenosis_pred)
+                all_stenosis_gts.append(stenosis_gt)
+
+                if plaque_gt != -1:
+                    effective_plaque_pred = plaque_pred if plaque_pred != -1 else num_classes
+                    all_plaque_preds.append(effective_plaque_pred)
+                    all_plaque_gts.append(plaque_gt)
+                elif plaque_pred != -1 and plaque_gt == -1:
+                    pass
+
+                if eval_sc and sc_outputs is not None and 'pred_logits' in sc_outputs:
+                    sc_logits_i = sc_outputs['pred_logits'][i]
+                    sc_preds_i = sc_logits_i.argmax(dim=-1)
+                    seq_length = sc_logits_i.shape[0]
+                    sc_gt_i = _build_sc_point_labels(target_i, seq_length).to(device)
+                    sc_correct += (sc_preds_i == sc_gt_i).sum().item()
+                    sc_total += seq_length
 
         if (batch_idx + 1) % 10 == 0:
             print(f"  Processed {batch_idx + 1}/{len(test_loader)} batches")
@@ -430,7 +590,8 @@ def main():
 
     # Run evaluation
     stenosis_metrics, plaque_metrics, sc_metrics = evaluate(
-        model, test_loader, device, num_classes, eval_sc=args.eval_sc
+        model, test_loader, device, num_classes, eval_sc=args.eval_sc,
+        tta=args.tta, tta_k=args.tta_k
     )
 
     # Print results

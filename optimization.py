@@ -81,15 +81,40 @@ class object_detection_loss(nn.Module):
         return loss_labels + loss_boxes
 
 
+def compute_sc_class_weights(num_classes):
+    """Return inverse-frequency inspired class weights for SC loss.
+
+    Background (class 0) accounts for ~64% of sampling points, so it gets
+    a lower weight (0.5) while all lesion classes share weight 1.5.
+
+    Args:
+        num_classes: Number of lesion classes (e.g. 3 for pre_training,
+            6 for fine_tuning).  The returned tensor has length
+            ``num_classes + 1`` (background class 0 included).
+
+    Returns:
+        Tensor of shape [num_classes + 1].
+    """
+    weights = torch.ones(num_classes + 1, dtype=torch.float32)
+    weights[0] = 0.5       # background
+    weights[1:] = 1.5      # all lesion classes
+    return weights
+
+
 class sampling_point_classification_loss(nn.Module):
-    def __init__(self, num_classes=3, seq_length=32):
+    def __init__(self, num_classes=3, seq_length=32, class_weights=None):
         super().__init__()
 
         self.num_classes = num_classes
         self.seq_length = seq_length
 
+        if class_weights is not None:
+            self.register_buffer('class_weights', class_weights)
+        else:
+            self.class_weights = None
+
     def loss_labels(self, outputs, targets):
-        return F.cross_entropy(outputs, targets)
+        return F.cross_entropy(outputs, targets, weight=self.class_weights)
 
     def forward(self, outputs, targets):
 
@@ -230,26 +255,30 @@ class dual_task_contrastive_loss(nn.Module):
 
 
 class spatio_temporal_contrast_loss(nn.Module):
-    def __init__(self, num_classes=2, seq_length=32, eos_coef=0.2):
+    def __init__(self, num_classes=2, seq_length=32, eos_coef=0.2,
+                 delta=1.0, sc_class_weights=None):
         super().__init__()
 
         self.num_classes = num_classes
         self.seq_length = seq_length
         self.eos_coef = eos_coef
+        self.delta = delta
 
         self.od_loss = object_detection_loss(num_classes=self.num_classes, eos_coef=self.eos_coef,
                                              matcher=funcs.HungarianMatcher())
-        self.sc_loss = sampling_point_classification_loss(num_classes=self.num_classes + 1, seq_length=self.seq_length)
+        self.sc_loss = sampling_point_classification_loss(
+            num_classes=self.num_classes + 1, seq_length=self.seq_length,
+            class_weights=sc_class_weights)
         self.dc_loss = dual_task_contrastive_loss(self.od_loss, self.sc_loss, seq_length=self.seq_length)
 
-    def forward(self, od_outputs, sc_outputs, od_targets, delta=1):
+    def forward(self, od_outputs, sc_outputs, od_targets):
 
         # Deep copy targets to prevent in-place mutation across loss terms
         od_targets_dc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         od_targets_od = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         od_targets_sc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
 
-        dc_loss_val = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * delta
+        dc_loss_val = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * self.delta
         od_loss_val = self.od_loss(od_outputs, od_targets_od)
         sc_loss_val = self.sc_loss(sc_outputs, od2sc_targets(od_targets_sc, self.seq_length))
         total_loss = dc_loss_val + od_loss_val + sc_loss_val

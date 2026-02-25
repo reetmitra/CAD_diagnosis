@@ -132,7 +132,7 @@ def online_augment(volume, labels):
 
 
 class cubic_sequence_data(data.Dataset):
-    def __init__(self, dataset_root, pattern='training', train_ratio=0.8, input_shape=[256,64,64], window=[300, 900], augment=False, num_classes=None):
+    def __init__(self, dataset_root, pattern='training', train_ratio=0.8, input_shape=[256,64,64], window=[300, 900], augment=False, num_classes=None, file_indices=None):
 
         self.volumes_root = os.path.join(dataset_root, 'volumes/')
         self.labels_root = os.path.join(dataset_root, 'labels/')
@@ -146,16 +146,25 @@ class cubic_sequence_data(data.Dataset):
         self.labels_file_list = os.listdir(self.labels_root)
         self.labels_file_list = sorted(self.labels_file_list)
         self.file_total = len(self.volumes_file_list)
-        if pattern == 'training':
+
+        # file_indices overrides the default train_ratio-based split
+        self.file_indices = file_indices
+        if file_indices is not None:
+            self.data_start = 0
+            self.data_end = 0
+            self.length = len(file_indices)
+        elif pattern == 'training':
             self.data_start = 0
             self.data_end = int(self.file_total * train_ratio)
+            self.length = self.data_end - self.data_start
         elif pattern == 'validation':
             self.data_start = int(self.file_total * train_ratio)
             self.data_end = int(self.file_total * (train_ratio + (1 - train_ratio) / 2))
+            self.length = self.data_end - self.data_start
         else:  # 'testing'
             self.data_start = int(self.file_total * (train_ratio + (1 - train_ratio) / 2))
             self.data_end = self.file_total
-        self.length = self.data_end - self.data_start
+            self.length = self.data_end - self.data_start
         return
 
     def read_data(self, volumes_file, labels_file):
@@ -213,7 +222,10 @@ class cubic_sequence_data(data.Dataset):
 
     def __getitem__(self, index):
 
-        actual_index = index + self.data_start
+        if self.file_indices is not None:
+            actual_index = self.file_indices[index]
+        else:
+            actual_index = index + self.data_start
         volumes_file = os.path.join(self.volumes_root, self.volumes_file_list[actual_index])
         labels_file = os.path.join(self.labels_root, self.labels_file_list[actual_index])
         ret_volumes, ret_labels = self.read_data(volumes_file, labels_file)

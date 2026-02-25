@@ -15,7 +15,10 @@ import augmentation as aug
 
 class sc_net_framework:
 
-    def __init__(self, pattern='pre_training', state_dict_root=None, data_root=None):
+    def __init__(self, pattern='pre_training', state_dict_root=None, data_root=None,
+                 delta=1.0, sc_class_weights=None,
+                 temporal_encoder_layers=None, temporal_heads=None,
+                 spatial_encoder_layers=None, spatial_decoder_layers=None):
 
         if pattern == "pre_training":
             self.model_pattern = "training"
@@ -26,6 +29,12 @@ class sc_net_framework:
         else:
             self.model_pattern = "testing"
             self.model_num_classes = opt.net_params["num_classes"][1]
+
+        # Store transformer overrides
+        self._temporal_encoder_layers = temporal_encoder_layers
+        self._temporal_heads = temporal_heads
+        self._spatial_encoder_layers = spatial_encoder_layers
+        self._spatial_decoder_layers = spatial_decoder_layers
 
         self.model = self.get_model()
         self.state_dict_root = state_dict_root
@@ -48,10 +57,25 @@ class sc_net_framework:
             self.window_lw = opt.data_params["window_lw"]
             self.batch_size = opt.data_params["batch_size"]
 
-            self.loss_fn = self.get_loss_fn()
+            self.loss_fn = self.get_loss_fn(delta=delta, sc_class_weights=sc_class_weights)
             self.dataLoader_train, self.dataLoader_eval, self.dataLoader_test = self.get_dataloader()
 
     def get_model(self):
+        # Build transformer param lists, applying any overrides
+        # temporal_transfromer_param = [heads, encoder_layers]
+        temporal_tf = list(opt.sc_params["temporal_transfromer_param"])
+        if self._temporal_heads is not None:
+            temporal_tf[0] = self._temporal_heads
+        if self._temporal_encoder_layers is not None:
+            temporal_tf[1] = self._temporal_encoder_layers
+
+        # spatial_transfromer_param = [encoder_layers, decoder_layers]
+        spatial_tf = list(opt.od_params["spatial_transfromer_param"])
+        if self._spatial_encoder_layers is not None:
+            spatial_tf[0] = self._spatial_encoder_layers
+        if self._spatial_decoder_layers is not None:
+            spatial_tf[1] = self._spatial_decoder_layers
+
         return spatio_temporal_semantic_learning(
             num_classes=self.model_num_classes,
             pattern=self.model_pattern,
@@ -62,7 +86,7 @@ class sc_net_framework:
             temporal_conv_maps=opt.sc_params["temporal_conv_maps"],
             temporal_feature_channels=opt.sc_params["temporal_feature_channels"],
             temporal_embedding_dim=opt.sc_params["temporal_embedding_dim"],
-            temporal_transfromer_param=opt.sc_params["temporal_transfromer_param"],
+            temporal_transfromer_param=temporal_tf,
             temporal_class_dim=opt.sc_params["temporal_class_dim"],
             spatial_conv_levels=opt.od_params["spatial_conv_levels"],
             spatial_conv_maps=opt.od_params["spatial_conv_maps"],
@@ -72,16 +96,18 @@ class sc_net_framework:
             spatial_3d_weight=opt.od_params["spatial_3d_weight"],
             spatial_proj_channels=opt.od_params["spatial_proj_channels"],
             spatial_embedding_shape=opt.od_params["spatial_embedding_shape"],
-            spatial_transfromer_param=opt.od_params["spatial_transfromer_param"],
+            spatial_transfromer_param=spatial_tf,
             spatial_num_query=opt.od_params["spatial_num_query"],
             spatial_od_dim_list=opt.od_params["spatial_od_dim_list"]
         )
 
-    def get_loss_fn(self):
+    def get_loss_fn(self, delta=1.0, sc_class_weights=None):
         return opt_fn.spatio_temporal_contrast_loss(
             num_classes=self.model_num_classes,
             seq_length=opt.net_params["cubeseq_length"],
-            eos_coef=opt.data_params["eos_coef"]
+            eos_coef=opt.data_params["eos_coef"],
+            delta=delta,
+            sc_class_weights=sc_class_weights,
         )
 
     def get_dataloader(self):

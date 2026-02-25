@@ -1,0 +1,52 @@
+# SC-Net hyperparameter sweep example
+# This file shows key parameters to vary when tuning.
+# Copy and modify for each sweep configuration.
+#
+# Usage: python train.py --config configs/sweep_example.yaml
+#
+# CLI overrides still work, e.g.:
+#   python train.py --config configs/sweep_example.yaml --lr 5e-5 --delta 0.5
+
+pattern: pre_training
+data_root: ./dataset/train
+epochs: 100
+
+# --- Key hyperparameters to sweep ---
+
+# Learning rate: try [5e-5, 1e-4, 2e-4, 5e-4]
+lr: 1.0e-4
+
+# Weight decay: try [1e-5, 1e-4, 1e-3]
+weight_decay: 1.0e-4
+
+# Contrastive loss weight: try [0.5, 1.0, 2.0, 5.0]
+delta: 1.0
+
+# EOS coefficient (set via config.py data_params; included here for reference)
+# eos_coef: 0.2
+
+# Warmup: try [5, 10, 20]
+warmup_epochs: 10
+
+# EMA decay: try [0.99, 0.999, 0.9995]
+ema_decay: 0.999
+
+# --- Transformer architecture ---
+# Temporal: try encoder_layers in [2, 4, 6], heads in [4, 8]
+temporal_encoder_layers: 4
+temporal_heads: 8
+
+# Spatial: try encoder/decoder layers in [2, 4, 6]
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# --- Fixed settings ---
+grad_clip: 0.1
+augment: true
+amp: true
+ema: true
+layerwise_lr: true
+sc_class_weight: true
+checkpoint_dir: ./checkpoints/sweep
+save_every: 10
+log_dir: ./runs

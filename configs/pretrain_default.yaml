@@ -1,0 +1,30 @@
+# SC-Net pre-training default configuration
+# Usage: python train.py --config configs/pretrain_default.yaml
+
+pattern: pre_training
+data_root: ./dataset/train
+epochs: 200
+lr: 1.0e-4
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+ema_decay: 0.999
+delta: 1.0
+augment: true
+amp: true
+ema: true
+layerwise_lr: true
+sc_class_weight: true
+
+# Transformer architecture
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging and checkpoints
+checkpoint_dir: ./checkpoints/pretrain
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10

@@ -7,7 +7,8 @@ class DefaultConfig(object):
         "eos_coef": 0.2,
         "train_ratio": 0.7,  # 70/15/15 split (train/validation/test)
         "window_lw": [300, 900],
-        "batch_size": 2
+        "batch_size": 2,
+        "delta": 1.0
     }
     net_params = {
         "input_shape": [256, 64, 64],

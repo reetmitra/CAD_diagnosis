@@ -34,12 +34,24 @@ from torch.utils.tensorboard import SummaryWriter
 
 from framework import sc_net_framework
 from config import opt
+from optimization import compute_sc_class_weights
 from scheduler_utils import LinearWarmupCosineDecay, ModelEMA, build_param_groups
 from eval import od_predictions_to_artery_level, targets_to_artery_level, compute_metrics
 
 
-def parse_args():
+def load_config(config_path):
+    """Load a YAML configuration file and return its contents as a dict."""
+    import yaml
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='SC-Net Training')
+
+    # --- YAML config ---
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to YAML config file (CLI args override YAML values)')
 
     # --- existing args ---
     parser.add_argument('--pattern', type=str, default='pre_training',
@@ -95,12 +107,38 @@ def parse_args():
     parser.add_argument('--augment', action='store_true',
                         help='Enable data augmentation for the training set')
 
+    parser.add_argument('--delta', type=float, default=1.0,
+                        help='Weight for the dual-task contrastive loss term')
+    parser.add_argument('--sc_class_weight', action='store_true', default=True,
+                        help='Enable class weighting for SC loss (default: True)')
+    parser.add_argument('--no_sc_class_weight', action='store_true',
+                        help='Disable class weighting for SC loss')
+
     parser.add_argument('--log_dir', type=str, default='./runs',
                         help='Base directory for TensorBoard logs')
     parser.add_argument('--log_every', type=int, default=10,
                         help='Log batch-level metrics every N batches')
 
-    args = parser.parse_args()
+    # --- transformer hyperparameters ---
+    parser.add_argument('--temporal_encoder_layers', type=int, default=None,
+                        help='Number of temporal transformer encoder layers (default: 4)')
+    parser.add_argument('--temporal_heads', type=int, default=None,
+                        help='Number of temporal transformer attention heads (default: 8)')
+    parser.add_argument('--spatial_encoder_layers', type=int, default=None,
+                        help='Number of spatial transformer encoder layers (default: 4)')
+    parser.add_argument('--spatial_decoder_layers', type=int, default=None,
+                        help='Number of spatial transformer decoder layers (default: 4)')
+
+    args = parser.parse_args(argv)
+
+    # Apply YAML config as defaults — CLI args take precedence
+    if args.config:
+        yaml_config = load_config(args.config)
+        for key, value in yaml_config.items():
+            if key == 'config':
+                continue  # skip self-reference
+            if not hasattr(args, key) or getattr(args, key) == parser.get_default(key):
+                setattr(args, key, value)
 
     # Resolve negation flags
     if args.no_amp:
@@ -109,6 +147,8 @@ def parse_args():
         args.layerwise_lr = False
     if args.no_ema:
         args.ema = False
+    if args.no_sc_class_weight:
+        args.sc_class_weight = False
 
     return args
 
@@ -198,10 +238,21 @@ class Trainer:
 
     def setup_model(self):
         """Instantiate the model and loss function, optionally wrap in DDP."""
+        # Compute SC class weights if enabled
+        sc_class_weights = None
+        if self.args.sc_class_weight:
+            sc_class_weights = compute_sc_class_weights(self.num_classes)
+
         fw = sc_net_framework(
             pattern=self.args.pattern,
             state_dict_root=self.args.pretrained,
             data_root=self.args.data_root,
+            delta=self.args.delta,
+            sc_class_weights=sc_class_weights,
+            temporal_encoder_layers=getattr(self.args, 'temporal_encoder_layers', None),
+            temporal_heads=getattr(self.args, 'temporal_heads', None),
+            spatial_encoder_layers=getattr(self.args, 'spatial_encoder_layers', None),
+            spatial_decoder_layers=getattr(self.args, 'spatial_decoder_layers', None),
         )
         self._fw = fw  # keep reference for data setup
 
@@ -632,7 +683,19 @@ class Trainer:
         print(f"  Weight decay:     {self.args.weight_decay}")
         print(f"  Grad clip:        {self.args.grad_clip}")
         print(f"  Augmentation:     {self.args.augment}")
+        print(f"  Delta (DC wt):    {self.args.delta}")
+        print(f"  SC class weight:  {self.args.sc_class_weight}")
         print(f"  Num classes:      {self.num_classes}")
+        if self.args.config:
+            print(f"  YAML config:      {self.args.config}")
+        if getattr(self.args, 'temporal_encoder_layers', None) is not None:
+            print(f"  Temporal enc layers: {self.args.temporal_encoder_layers}")
+        if getattr(self.args, 'temporal_heads', None) is not None:
+            print(f"  Temporal heads:      {self.args.temporal_heads}")
+        if getattr(self.args, 'spatial_encoder_layers', None) is not None:
+            print(f"  Spatial enc layers:  {self.args.spatial_encoder_layers}")
+        if getattr(self.args, 'spatial_decoder_layers', None) is not None:
+            print(f"  Spatial dec layers:  {self.args.spatial_decoder_layers}")
         print(f"  Parameters:       {total_params:,} total, {trainable_params:,} trainable")
         if self.writer is not None:
             print(f"  TensorBoard:      {self.writer.log_dir}")
