@@ -17,6 +17,7 @@ class sc_net_framework:
 
     def __init__(self, pattern='pre_training', state_dict_root=None, data_root=None,
                  delta=1.0, sc_class_weights=None,
+                 use_focal=False, focal_gamma=2.0,
                  temporal_encoder_layers=None, temporal_heads=None,
                  spatial_encoder_layers=None, spatial_decoder_layers=None):
 
@@ -29,6 +30,10 @@ class sc_net_framework:
         else:
             self.model_pattern = "testing"
             self.model_num_classes = opt.net_params["num_classes"][1]
+
+        # Store focal loss settings
+        self._use_focal = use_focal
+        self._focal_gamma = focal_gamma
 
         # Store transformer overrides
         self._temporal_encoder_layers = temporal_encoder_layers
@@ -57,7 +62,9 @@ class sc_net_framework:
             self.window_lw = opt.data_params["window_lw"]
             self.batch_size = opt.data_params["batch_size"]
 
-            self.loss_fn = self.get_loss_fn(delta=delta, sc_class_weights=sc_class_weights)
+            self.loss_fn = self.get_loss_fn(delta=delta, sc_class_weights=sc_class_weights,
+                                               use_focal=self._use_focal,
+                                               focal_gamma=self._focal_gamma)
             self.dataLoader_train, self.dataLoader_eval, self.dataLoader_test = self.get_dataloader()
 
     def get_model(self):
@@ -101,13 +108,16 @@ class sc_net_framework:
             spatial_od_dim_list=opt.od_params["spatial_od_dim_list"]
         )
 
-    def get_loss_fn(self, delta=1.0, sc_class_weights=None):
+    def get_loss_fn(self, delta=1.0, sc_class_weights=None,
+                    use_focal=False, focal_gamma=2.0):
         return opt_fn.spatio_temporal_contrast_loss(
             num_classes=self.model_num_classes,
             seq_length=opt.net_params["cubeseq_length"],
             eos_coef=opt.data_params["eos_coef"],
             delta=delta,
             sc_class_weights=sc_class_weights,
+            use_focal=use_focal,
+            focal_gamma=focal_gamma,
         )
 
     def get_dataloader(self):

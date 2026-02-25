@@ -104,6 +104,14 @@ def parse_args(argv=None):
     parser.add_argument('--ema_decay', type=float, default=0.999,
                         help='EMA decay factor')
 
+    parser.add_argument('--accumulate_steps', type=int, default=1,
+                        help='Gradient accumulation steps (default: 1, no accumulation)')
+
+    parser.add_argument('--patience', type=int, default=0,
+                        help='Early stopping patience (0 = disabled)')
+    parser.add_argument('--min_delta', type=float, default=0.0,
+                        help='Minimum val loss improvement for early stopping')
+
     parser.add_argument('--augment', action='store_true',
                         help='Enable data augmentation for the training set')
 
@@ -113,6 +121,11 @@ def parse_args(argv=None):
                         help='Enable class weighting for SC loss (default: True)')
     parser.add_argument('--no_sc_class_weight', action='store_true',
                         help='Disable class weighting for SC loss')
+
+    parser.add_argument('--focal_loss', action='store_true',
+                        help='Use focal loss instead of CE for SC branch')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='Gamma (focusing param) for focal loss (default: 2.0)')
 
     parser.add_argument('--log_dir', type=str, default='./runs',
                         help='Base directory for TensorBoard logs')
@@ -215,6 +228,7 @@ class Trainer:
         self.start_epoch = 0
         self.best_val_loss = float('inf')
         self.global_step = 0
+        self.patience_counter = 0
 
         # ---- TensorBoard ----
         self.writer = None
@@ -249,6 +263,8 @@ class Trainer:
             data_root=self.args.data_root,
             delta=self.args.delta,
             sc_class_weights=sc_class_weights,
+            use_focal=self.args.focal_loss,
+            focal_gamma=self.args.focal_gamma,
             temporal_encoder_layers=getattr(self.args, 'temporal_encoder_layers', None),
             temporal_heads=getattr(self.args, 'temporal_heads', None),
             spatial_encoder_layers=getattr(self.args, 'spatial_encoder_layers', None),
@@ -396,50 +412,63 @@ class Trainer:
         total_sc = 0.0
         total_dc = 0.0
         num_batches = 0
+        accum = self.args.accumulate_steps
+        grad_norm = 0.0
+        num_train_batches = len(self.train_loader)
 
         for batch_idx, (images, targets) in enumerate(self.train_loader):
             images = images.to(self.device)
             targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
 
-            self.optimizer.zero_grad()
+            # Zero gradients at the start of each accumulation window
+            if batch_idx % accum == 0:
+                self.optimizer.zero_grad()
+
+            is_accum_step = ((batch_idx + 1) % accum == 0 or
+                             (batch_idx + 1) == num_train_batches)
 
             if self.use_amp:
                 with torch.amp.autocast('cuda'):
                     od_outputs, sc_outputs = self.model(images)
                     loss_dict = self.loss_fn(od_outputs, sc_outputs, targets)
-                    loss = loss_dict['total']
+                    loss = loss_dict['total'] / accum
 
                 self.scaler.scale(loss).backward()
 
-                if self.args.grad_clip > 0:
-                    self.scaler.unscale_(self.optimizer)
-                    grad_norm = nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.args.grad_clip)
-                else:
-                    grad_norm = self._compute_grad_norm()
+                if is_accum_step:
+                    if self.args.grad_clip > 0:
+                        self.scaler.unscale_(self.optimizer)
+                        grad_norm = nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.args.grad_clip)
+                    else:
+                        grad_norm = self._compute_grad_norm()
 
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                    if self.ema is not None:
+                        self.ema.update(self.model)
             else:
                 od_outputs, sc_outputs = self.model(images)
                 loss_dict = self.loss_fn(od_outputs, sc_outputs, targets)
-                loss = loss_dict['total']
+                loss = loss_dict['total'] / accum
 
                 loss.backward()
 
-                if self.args.grad_clip > 0:
-                    grad_norm = nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.args.grad_clip)
-                else:
-                    grad_norm = self._compute_grad_norm()
+                if is_accum_step:
+                    if self.args.grad_clip > 0:
+                        grad_norm = nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.args.grad_clip)
+                    else:
+                        grad_norm = self._compute_grad_norm()
 
-                self.optimizer.step()
+                    self.optimizer.step()
 
-            # EMA update
-            if self.ema is not None:
-                self.ema.update(self.model)
+                    if self.ema is not None:
+                        self.ema.update(self.model)
 
-            batch_loss = loss.item()
+            # Record unscaled loss for logging
+            batch_loss = loss.item() * accum
             batch_od = loss_dict['od'].item()
             batch_sc = loss_dict['sc'].item()
             batch_dc = loss_dict['dc'].item()
@@ -461,7 +490,7 @@ class Trainer:
 
             if self.is_main and (batch_idx + 1) % self.args.print_every == 0:
                 avg_loss = total_loss / num_batches
-                print(f"  Epoch [{epoch}] Batch [{batch_idx + 1}/{len(self.train_loader)}] "
+                print(f"  Epoch [{epoch}] Batch [{batch_idx + 1}/{num_train_batches}] "
                       f"Loss: {batch_loss:.4f} (OD: {batch_od:.4f} "
                       f"SC: {batch_sc:.4f} DC: {batch_dc:.4f}) "
                       f"Avg: {avg_loss:.4f}")
@@ -629,17 +658,31 @@ class Trainer:
                     self.writer.flush()
 
                 # Save best model
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
+                if val_loss < self.best_val_loss - self.args.min_delta:
                     self.save_checkpoint(
                         epoch, val_loss,
                         os.path.join(self.args.checkpoint_dir, 'best_model.pth'),
                     )
                     print(f"  -> New best model saved (val_loss={val_loss:.4f})")
+                elif self.args.patience > 0:
+                    print(f"  -> No improvement ({self.patience_counter + 1}/{self.args.patience})")
 
                 # Periodic checkpoint
                 if (epoch + 1) % self.args.save_every == 0:
                     self.save_checkpoint(epoch, val_loss)
+
+            # Early stopping tracking (all ranks, so DDP stays in sync)
+            if val_loss < self.best_val_loss - self.args.min_delta:
+                self.best_val_loss = val_loss
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+
+            if self.args.patience > 0 and self.patience_counter >= self.args.patience:
+                if self.is_main:
+                    print(f"Early stopping at epoch {epoch} "
+                          f"(no improvement for {self.args.patience} epochs)")
+                break
 
         # Final checkpoint
         if self.is_main:
@@ -682,9 +725,21 @@ class Trainer:
         print(f"  Learning rate:    {self.args.lr}")
         print(f"  Weight decay:     {self.args.weight_decay}")
         print(f"  Grad clip:        {self.args.grad_clip}")
+        batch_size = opt.data_params["batch_size"]
+        effective_bs = batch_size * self.world_size * self.args.accumulate_steps
+        print(f"  Accum steps:      {self.args.accumulate_steps}")
+        print(f"  Effective batch:  {effective_bs} "
+              f"({batch_size} x {self.world_size} GPUs x {self.args.accumulate_steps} accum)")
+        if self.args.patience > 0:
+            print(f"  Early stopping:   patience={self.args.patience}, "
+                  f"min_delta={self.args.min_delta}")
+        else:
+            print(f"  Early stopping:   disabled")
         print(f"  Augmentation:     {self.args.augment}")
         print(f"  Delta (DC wt):    {self.args.delta}")
         print(f"  SC class weight:  {self.args.sc_class_weight}")
+        print(f"  Focal loss:       {self.args.focal_loss}"
+              + (f" (gamma={self.args.focal_gamma})" if self.args.focal_loss else ""))
         print(f"  Num classes:      {self.num_classes}")
         if self.args.config:
             print(f"  YAML config:      {self.args.config}")

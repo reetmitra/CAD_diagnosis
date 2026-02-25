@@ -78,6 +78,29 @@
 - Exposed `--temporal_encoder_layers`, `--temporal_heads`, `--spatial_encoder_layers`, `--spatial_decoder_layers` as CLI args
 - Overrides applied at runtime in `framework.py`, `DefaultConfig` unchanged
 
+### Focal Loss for SC Branch
+
+- Added `FocalLoss` class to `optimization.py` with configurable gamma
+- `--focal_loss` flag and `--focal_gamma` (default 2.0) CLI args
+- Uses class_weights as alpha parameter; combines with existing SC weighting
+
+### Gradient Accumulation
+
+- `--accumulate_steps` (default 1) in `train.py`
+- Loss scaled by 1/steps, optimizer steps only on accumulation boundaries
+- Effective batch size = batch_size × world_size × accumulate_steps
+
+### Early Stopping
+
+- `--patience` (default 0, disabled) and `--min_delta` (default 0.0) in `train.py`
+- All DDP ranks track val_loss identically, no broadcast needed
+
+### Detailed Evaluation Metrics
+
+- `--detailed` flag in `eval.py`: confusion matrices, per-class precision/recall/F1, AUC-ROC
+- `--save_results` flag: exports all metrics to JSON file
+- `--ensemble ckpt1.pth ckpt2.pth ...`: averages softmax predictions across multiple models, combines with TTA
+
 ---
 
 ## Implemented Changes (Prior)

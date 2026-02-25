@@ -101,19 +101,55 @@ def compute_sc_class_weights(num_classes):
     return weights
 
 
+class FocalLoss(nn.Module):
+    """Focal loss for handling class imbalance in classification tasks.
+
+    Applies a modulating factor (1 - p_t)^gamma to the standard cross-entropy
+    loss so that well-classified examples contribute less and hard, misclassified
+    examples dominate the gradient.
+
+    Args:
+        alpha: Per-class weight tensor (same role as ``weight`` in CE).
+        gamma: Focusing parameter. Higher values down-weight easy examples more.
+        reduction: ``'mean'`` or ``'sum'``.
+    """
+
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        return focal_loss.sum()
+
+
 class sampling_point_classification_loss(nn.Module):
-    def __init__(self, num_classes=3, seq_length=32, class_weights=None):
+    def __init__(self, num_classes=3, seq_length=32, class_weights=None,
+                 use_focal=False, focal_gamma=2.0):
         super().__init__()
 
         self.num_classes = num_classes
         self.seq_length = seq_length
+        self.use_focal = use_focal
 
         if class_weights is not None:
             self.register_buffer('class_weights', class_weights)
         else:
             self.class_weights = None
 
+        if self.use_focal:
+            self.focal_loss_fn = FocalLoss(
+                alpha=self.class_weights, gamma=focal_gamma, reduction='mean')
+
     def loss_labels(self, outputs, targets):
+        if self.use_focal:
+            return self.focal_loss_fn(outputs, targets)
         return F.cross_entropy(outputs, targets, weight=self.class_weights)
 
     def forward(self, outputs, targets):
@@ -256,7 +292,8 @@ class dual_task_contrastive_loss(nn.Module):
 
 class spatio_temporal_contrast_loss(nn.Module):
     def __init__(self, num_classes=2, seq_length=32, eos_coef=0.2,
-                 delta=1.0, sc_class_weights=None):
+                 delta=1.0, sc_class_weights=None,
+                 use_focal=False, focal_gamma=2.0):
         super().__init__()
 
         self.num_classes = num_classes
@@ -268,7 +305,8 @@ class spatio_temporal_contrast_loss(nn.Module):
                                              matcher=funcs.HungarianMatcher())
         self.sc_loss = sampling_point_classification_loss(
             num_classes=self.num_classes + 1, seq_length=self.seq_length,
-            class_weights=sc_class_weights)
+            class_weights=sc_class_weights,
+            use_focal=use_focal, focal_gamma=focal_gamma)
         self.dc_loss = dual_task_contrastive_loss(self.od_loss, self.sc_loss, seq_length=self.seq_length)
 
     def forward(self, od_outputs, sc_outputs, od_targets):

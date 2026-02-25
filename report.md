@@ -345,6 +345,21 @@ Implemented all remaining future development items in a single batch:
 | Cross-Validation | `cross_validate.py`, `augmentation.py` | Patient-level k-fold (no leakage), `file_indices` param for flexible splits, reports mean ± std |
 | Transformer Tuning | `train.py`, `framework.py` | `--temporal_encoder_layers`, `--temporal_heads`, `--spatial_encoder_layers`, `--spatial_decoder_layers` CLI args |
 
+#### 5.8 Training & Evaluation Enhancements
+
+Additional low-effort, high-impact improvements:
+
+| Feature | File(s) | Details |
+|---------|---------|---------|
+| Focal Loss | `optimization.py`, `framework.py`, `train.py` | `FocalLoss` class with `--focal_loss` flag and `--focal_gamma` (default 2.0). Better than CE for hard boundary samples. Alpha = class_weights. |
+| Gradient Accumulation | `train.py` | `--accumulate_steps` (default 1). Simulates larger batch sizes without extra GPU memory. Effective batch = batch_size × world_size × accumulate_steps. |
+| Early Stopping | `train.py` | `--patience` (default 0 = disabled) and `--min_delta`. Stops training when val loss plateaus for N epochs. All DDP ranks stay synchronized. |
+| Confusion Matrices | `eval.py` | `--detailed` flag prints confusion matrices for stenosis and plaque with aligned class labels. |
+| Per-Class Metrics | `eval.py` | Per-class precision, recall, F1 printed in detailed mode (not just macro-averaged). |
+| AUC-ROC | `eval.py` | One-vs-rest AUC per class using sklearn (with try/except fallback). Requires `--detailed`. |
+| Result Saving | `eval.py` | `--save_results` saves all metrics to JSON for easy run comparison. |
+| Ensemble Inference | `eval.py` | `--ensemble ckpt1.pth ckpt2.pth ...` averages softmax predictions across multiple models. Combines with TTA. |
+
 ---
 
 ## Key Architecture Details
