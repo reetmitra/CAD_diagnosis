@@ -71,7 +71,7 @@ def gradient_preference(*input_tensors):
 
 
 class HungarianMatcher(nn.Module):
-    def __init__(self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1):
+    def __init__(self, cost_class: float = 1, cost_bbox: float = 5, cost_giou: float = 2):
         super().__init__()
 
         self.cost_class = cost_class
@@ -116,8 +116,15 @@ def box_lastdim_expansion(data):
         shape[-1] = 4
         return torch.zeros(shape, dtype=data.dtype, device=data.device)
 
-    expanded_data = data.unsqueeze(-2).expand(*data.shape[:-1], 2, 2).reshape(*data.shape[:-1], 4)
-    return expanded_data[..., [0, 2, 1, 3]]
+    # 1D vessel-axis boxes [cx, w] → [cx, cy=0.5, w, h=1.0]
+    # A lesion interval along the vessel spans the full CPR cross-section height,
+    # so cy is always the centre (0.5) and h is always 1.0.  This gives correct
+    # 1D IoU when later converted to xyxy: [cx-w/2, 0, cx+w/2, 1].
+    cx = data[..., 0:1]
+    w  = data[..., 1:2]
+    cy = torch.full_like(cx, 0.5)
+    h  = torch.ones_like(w)
+    return torch.cat([cx, cy, w, h], dim=-1)
 
 
 def boxes_dimension_expansion(data, dtype='outputs'):

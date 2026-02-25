@@ -46,7 +46,8 @@ class object_detection_loss(nn.Module):
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
         loss_giou = 1 - torch.diag(funcs.generalized_box_iou(funcs.box_cxcywh_to_xyxy(src_boxes),
                                                             funcs.box_cxcywh_to_xyxy(target_boxes)))
-        return loss_bbox.sum() / num_boxes + loss_giou.sum() / num_boxes
+        # Paper Eq. 5: λ_L1=5, λ_iou=2
+        return 5.0 * loss_bbox.sum() / num_boxes + 2.0 * loss_giou.sum() / num_boxes
 
     def _get_src_permutation_idx(self, indices):
 

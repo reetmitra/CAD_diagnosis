@@ -425,6 +425,52 @@ Checkpoints: `checkpoints_v3/`, TensorBoard logs: `runs_v3/`
 
 ---
 
+### Phase 6: Core Architecture Bug Fixes + v4 Training (2026-02-25)
+
+Deep analysis of the paper against the implementation revealed three root causes explaining the gap between our 0.702 stenosis ACC and the paper's reported 0.914.
+
+#### 6.1 Root Cause 1: Box Expansion Wrong Geometry
+
+| | |
+|---|---|
+| **File** | `functions.py`, function `box_lastdim_expansion()` |
+| **Commit** | (see below) |
+| **Root cause** | The paper uses 1D bounding boxes r_i ∈ [0,1]² = (center, width) along the coronary vessel axis. The code expanded these to 4D via a reshape trick: `[cx, w] → [cx, cx, w, w]`, interpreted as `[cx, cy, w, h]` with `cy = cx` and `h = w`. This creates **square boxes whose y-coordinates depend on vessel position**. All GIoU computations in `L_od` and `L_dc` were computing area overlap of floating squares instead of interval overlap along the vessel. |
+| **Fix** | Correct expansion: `[cx, w] → [cx, 0.5, w, 1.0]` — center y=0.5 (middle of CPR), height=1.0 (full CPR height). Converted to xyxy: `[cx-w/2, 0, cx+w/2, 1]`. This gives true 1D interval IoU along the vessel axis. |
+| **Impact** | `L_od` box regression loss now correct. `L_dc` (dual-task contrastive loss — the paper's core novelty) now uses correct pseudo-target matching. Both were computing wrong gradients on every training step since the beginning. |
+
+#### 6.2 Root Cause 2: Loss Weights Not Matching Paper
+
+| | |
+|---|---|
+| **File** | `optimization.py:49`, `functions.py:74` |
+| **Root cause** | Paper Eq. 5 specifies λ_L1=5 and λ_iou=2 for the bounding box regression loss. Code used equal 1:1 weights. The Hungarian matcher cost coefficients also did not reflect these weights. |
+| **Fix** | `loss_boxes()` now returns `5.0 * L1 + 2.0 * GIoU`. `HungarianMatcher` default weights updated to `cost_bbox=5, cost_giou=2` so matching and loss use consistent relative scales. |
+
+#### 6.3 Root Cause 3: Fine-Tuning Never Run
+
+| | |
+|---|---|
+| **Status** | Identified — pending execution |
+| **Root cause** | The paper achieves 0.914 stenosis ACC on the **fine-tuned** model (6-class: full stenosis × plaque labels). All our training runs have been pre-training only (3-class: plaque composition). The fine-tuning infrastructure (scripts, config, framework) exists and works but has never been executed. |
+| **Impact** | The pre-trained model evaluated in `pre_training` mode gives 0.702 stenosis ACC. The fine-tuned model is expected to be substantially higher. |
+| **Next step** | Launch fine-tuning from best v4 pre-training checkpoint once it reaches epoch 50+. |
+
+#### 6.4 v4 Training Launch
+
+Killed v3 (200 epochs, used wrong box expansion throughout). Relaunched as v4 with all three fixes:
+
+| Parameter | v3 Value | v4 Value | Change |
+|-----------|----------|----------|--------|
+| Box expansion | `[cx, cx, w, w]` (wrong) | `[cx, 0.5, w, 1.0]` (correct) | **Critical fix** |
+| Loss weights | 1:1 (L1:GIoU) | 5:2 (paper-correct) | **Critical fix** |
+| Matcher weights | 1:1:1 | 1:5:2 (class:bbox:giou) | **Critical fix** |
+| Focal loss, SC weights, DDP, AMP, EMA, augmentation | All enabled | Carried forward | — |
+
+Checkpoints: `checkpoints_v4/`, TensorBoard: `runs_v4/`
+
+---
+
 ## Key Architecture Details
 
 ### Input Pipeline

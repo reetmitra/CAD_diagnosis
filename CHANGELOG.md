@@ -2,6 +2,25 @@
 
 ## Recent Changes (2026-02-25)
 
+### Critical Architecture Fixes (paper analysis — 3 root causes of performance gap)
+
+#### Fix: Box Expansion Wrong Geometry (`functions.py:119-120`)
+- **Root cause**: `box_lastdim_expansion` expanded 1D vessel-axis boxes `[cx, w]` to `[cx, cx, w, w]`, creating square boxes where y-coordinates depended on vessel position. GIoU was computing area overlap of squares, not interval overlap along the vessel.
+- **Fix**: Correct expansion to `[cx, 0.5, w, 1.0]` — center y=0.5, height=1.0 — so converted xyxy boxes span `[cx-w/2, 0, cx+w/2, 1]`. This gives true 1D interval IoU.
+- **Impact**: Fixes L_od loss and L_dc (dual-task contrastive loss) — the paper's core novelty was silently computing wrong gradients in every training step.
+
+#### Fix: Loss Weights Not Matching Paper Eq. 5 (`optimization.py:49`, `functions.py:74`)
+- **Root cause**: Paper specifies λ_L1=5, λ_iou=2 for the box regression loss. Code used equal 1:1 weights.
+- **Fix**: `5.0 * L1 + 2.0 * GIoU` in `loss_boxes()`. Hungarian matcher defaults updated to `cost_bbox=5, cost_giou=2` for consistency.
+
+#### Finding: Fine-Tuning Never Run (next step)
+- Paper achieves 0.914 stenosis ACC on the **fine-tuned** 6-class model. All our runs used pre-training (3-class) only.
+- Fine-tuning infrastructure exists; will be launched once v4 pre-training produces a corrected checkpoint.
+
+### v4 Training Launch
+- Killed v3 (trained with wrong box expansion)
+- Restarted as v4 with all three fixes: correct box expansion, correct loss weights, plus all v3 features (focal loss, SC class weights, gradient accumulation, early stopping, DDP, AMP, EMA, augmentation)
+
 ### Baseline Evaluation
 
 - Evaluated `checkpoints/best_model.pth` (v1, epoch 20, pre_training) on all 665 test files in `dataset/test/`
