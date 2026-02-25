@@ -116,7 +116,10 @@ class FocalLoss(nn.Module):
 
     def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
         super().__init__()
-        self.alpha = alpha
+        if alpha is not None:
+            self.register_buffer('alpha', alpha)
+        else:
+            self.alpha = None
         self.gamma = gamma
         self.reduction = reduction
 
