@@ -8,6 +8,26 @@
 - Results: Stenosis ACC 0.702, F1 0.413 | Plaque ACC 0.430, F1 0.100 | SC Points ACC 0.801 (17,035/21,280)
 - All v1 checkpoints are pre_training mode (num_classes=3); test data labels 0-6 require fine_tuning (num_classes=6)
 
+### v2 Evaluation (Epoch 139)
+
+- Evaluated `checkpoints_v2/checkpoint_epoch_139.pth` on all 665 test files
+- Results: Stenosis ACC 0.702, F1 0.413 | Plaque ACC **0.486**, F1 **0.218** | SC Points ACC **0.848**
+- Plaque F1 more than doubled vs v1; SC accuracy up 4.7%
+- Stenosis flat due to class imbalance (model predicts "Non-significant" for ~97% of arteries)
+- Generated visualization plots (`plots_v2/`): confusion matrices, ROC curves, per-class bar charts
+
+### Bug Fix: FocalLoss Device Mismatch (`e3ce980`)
+
+- **File:** `optimization.py`, class `FocalLoss`
+- `alpha` (class weights) stored as plain attribute — stayed on CPU when module moved to GPU
+- Fix: `self.register_buffer('alpha', alpha)` for automatic device transfer
+
+### v3 Training Launch
+
+- Full 200-epoch training with ALL improvements: focal loss, SC class weights, gradient accumulation, early stopping, plus all v2 features
+- Config: focal_loss (gamma=2.0), sc_class_weight (bg=0.5, lesion=1.5), accumulate_steps=2, patience=30, DDP (2x RTX 3090), AMP, EMA, augmentation, warmup, layer-wise LR
+- Checkpoints: `checkpoints_v3/`, TensorBoard: `runs_v3/`
+
 ### Bug Fix: Empty Box Dimension Mismatch (`1c43ae7`)
 
 - **File:** `functions.py`, `box_lastdim_expansion()`

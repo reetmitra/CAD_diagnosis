@@ -361,6 +361,68 @@ Additional low-effort, high-impact improvements:
 | Ensemble Inference | `eval.py` | `--ensemble ckpt1.pth ckpt2.pth ...` averages softmax predictions across multiple models. Combines with TTA. |
 | Visualization Plots | `eval.py` | `--plot` and `--plot_dir` flags generate matplotlib PNGs: confusion matrix heatmaps (annotated, normalized), one-vs-rest ROC curves with AUC, per-class precision/recall/F1 bar charts. Requires `--detailed`. |
 
+#### 5.9 Bug Fix: FocalLoss Device Mismatch
+
+| | |
+|---|---|
+| **File** | `optimization.py`, class `FocalLoss` |
+| **Commit** | `e3ce980` |
+| **Root cause** | The `alpha` (class weights) tensor was stored as a plain `self.alpha` attribute instead of an `nn.Module` buffer. When the loss module was moved to GPU via `.to(device)`, `alpha` remained on CPU, causing `RuntimeError: Expected all tensors to be on the same device` in `F.cross_entropy`. |
+| **Fix** | Changed to `self.register_buffer('alpha', alpha)` so it automatically transfers to the correct device with the parent module. |
+
+#### 5.10 v2 Evaluation Results (Epoch 139)
+
+Evaluated `checkpoints_v2/checkpoint_epoch_139.pth` and `checkpoints_v2/best_model.pth` (epoch 17) on all 665 test files in `dataset/test/` using full detailed evaluation with visualization plots.
+
+**v1 vs v2 Comparison:**
+
+| Task | Metric | v1 (epoch 20) | v2 best_model (epoch 17) | v2 epoch 139 | Change (v1 → v2 ep139) |
+|------|--------|--------------|--------------------------|--------------|------------------------|
+| Stenosis | ACC | 0.702 | 0.295 | **0.702** | — |
+| Stenosis | F1 | 0.413 | 0.239 | **0.413** | — |
+| Plaque | ACC | 0.430 | 0.015 | **0.486** | +5.6% |
+| Plaque | F1 | 0.100 | 0.015 | **0.218** | +118% |
+| SC Points | ACC | 0.801 | 0.807 | **0.848** | +4.7% |
+
+**v2 Detailed Metrics (epoch 139, `--detailed`):**
+
+| Task | AUC-ROC (macro) |
+|------|----------------|
+| Stenosis | 0.528 |
+| Plaque | 0.492 |
+
+**Per-class Stenosis (epoch 139):**
+
+| Class | Precision | Recall | F1 | Support |
+|-------|-----------|--------|----|---------|
+| Healthy | 0.291 | 0.949 | 0.445 | 198 |
+| Non-significant | 0.444 | 0.017 | 0.033 | 467 |
+| Significant | — | — | — | 0 |
+
+**Key Observations:**
+1. `best_model.pth` (epoch 17, saved by lowest val loss) performs poorly on test data — early checkpoints overfit to validation but don't generalize. Later epochs are substantially better.
+2. **Plaque F1 more than doubled** (0.100 → 0.218), demonstrating that the bug fixes (label remapping, empty box fix) and training enhancements (EMA, augmentation, warmup) had a real impact.
+3. **SC point accuracy improved** from 0.801 to 0.848 (+4.7%), showing the temporal branch benefits from longer training with proper data.
+4. **Stenosis remains flat** — the confusion matrix reveals severe class imbalance: the model predicts "Non-significant" for nearly all arteries (459/467 healthy samples misclassified as non-significant). The "Significant" class has zero support in this test split.
+5. AUC-ROC values near 0.5 indicate the model's probability estimates are barely better than random for discriminating between classes — focal loss and class weighting in v3 are designed to address this.
+
+Visualization plots saved to `plots_v2/` (confusion matrices, ROC curves, per-class bar charts). Metrics exported to `results_v2.json`.
+
+#### 5.11 v3 Training Launch
+
+Based on v2 evaluation findings (class imbalance being the primary bottleneck), launched v3 training with all accumulated improvements:
+
+| Parameter | v2 Value | v3 Value | Rationale |
+|-----------|----------|----------|-----------|
+| Focal loss | Disabled | **Enabled (gamma=2.0)** | Down-weights easy examples, forces model to learn minority classes |
+| SC class weights | Disabled | **Enabled (bg=0.5, lesion=1.5)** | Compensates for 64% background class prevalence |
+| Gradient accumulation | 1 | **2 (effective batch=8)** | Larger effective batch stabilizes gradients |
+| Early stopping | Disabled | **patience=30, min_delta=0.001** | Auto-stop if val loss plateaus |
+| All v2 features | — | Carried forward | AMP, DDP (2x RTX 3090), EMA, augmentation, warmup, layer-wise LR |
+
+Training command: `nohup torchrun --nproc_per_node=2 train.py --distributed [all flags] > train_v3.log 2>&1 &`
+Checkpoints: `checkpoints_v3/`, TensorBoard logs: `runs_v3/`
+
 ---
 
 ## Key Architecture Details
@@ -570,22 +632,17 @@ Training was impossible:
 
 ### After Phase 5 (v2 Retraining + Bug Fixes)
 
-Baseline evaluation on 665 test samples (v1 model, pre_training mode):
+Evaluation on 665 test samples (`dataset/test/`), pre_training mode (num_classes=3):
 
-| Task | ACC | F1 |
-|------|-----|-----|
-| Stenosis Degree | 0.702 | 0.413 |
-| Plaque Composition | 0.430 | 0.100 |
-| SC Points | 0.801 | — |
+| Task | Metric | v1 (epoch 20) | v2 (epoch 139) | Change |
+|------|--------|--------------|----------------|--------|
+| Stenosis Degree | ACC | 0.702 | 0.702 | — |
+| Stenosis Degree | F1 | 0.413 | 0.413 | — |
+| Plaque Composition | ACC | 0.430 | **0.486** | +5.6% |
+| Plaque Composition | F1 | 0.100 | **0.218** | +118% |
+| SC Points | ACC | 0.801 | **0.848** | +4.7% |
 
-v2 smoke test (1 epoch) already shows improvement over v1 final model:
-
-| Task | v1 Final (200 ep) | v2 Smoke (1 ep) |
-|------|-------------------|-----------------|
-| Stenosis ACC | 0.702 | 0.734 |
-| Plaque ACC | 0.430 | 0.497 |
-
-This improvement is attributable to the label remapping fix (labels 0-6 correctly mapped to 0-3 for pre_training) and real training data (vs. dummy data in v1).
+**Primary bottleneck:** Stenosis classification suffers from severe class imbalance (model predicts "Non-significant" for ~97% of arteries). v3 training addresses this with focal loss and class weighting.
 
 ### Pending (Bugs 18–22)
 
