@@ -18,10 +18,12 @@ Usage:
   python eval.py --checkpoint ./checkpoints/best_model.pth --pattern fine_tuning --detailed --save_results results.json
   python eval.py --checkpoint ./checkpoints/best_model.pth --pattern fine_tuning --ensemble ckpt1.pth ckpt2.pth ckpt3.pth
   python eval.py --checkpoint ./checkpoints/best_model.pth --pattern fine_tuning --ensemble ./checkpoints/checkpoint_epoch_*.pth --tta --detailed
+  python eval.py --checkpoint ./checkpoints/best_model.pth --pattern fine_tuning --detailed --plot --plot_dir ./my_plots
 """
 
 import argparse
 import json
+import os
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -62,6 +64,10 @@ def parse_args():
     parser.add_argument('--ensemble', type=str, nargs='+', default=None,
                         help='Ensemble inference: one or more checkpoint paths '
                              '(e.g., --ensemble ckpt1.pth ckpt2.pth ckpt3.pth)')
+    parser.add_argument('--plot', action='store_true',
+                        help='Generate and save visualization plots (requires --detailed)')
+    parser.add_argument('--plot_dir', type=str, default='./plots',
+                        help='Directory to save plot files (default: ./plots)')
     return parser.parse_args()
 
 
@@ -1208,6 +1214,314 @@ def _build_results_dict(stenosis_metrics, plaque_metrics, sc_metrics,
     return results
 
 
+def _compute_roc_points(labels, scores):
+    """Compute FPR and TPR arrays for an ROC curve.
+
+    Args:
+        labels: binary np.ndarray (1 = positive, 0 = negative)
+        scores: np.ndarray of predicted scores for the positive class
+
+    Returns:
+        fpr: np.ndarray of false positive rates
+        tpr: np.ndarray of true positive rates
+    """
+    desc_idx = np.argsort(-scores)
+    labels_sorted = labels[desc_idx]
+
+    num_pos = labels.sum()
+    num_neg = len(labels) - num_pos
+    if num_pos == 0 or num_neg == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+
+    tp = 0
+    fp = 0
+    fpr_list = [0.0]
+    tpr_list = [0.0]
+
+    for i in range(len(labels_sorted)):
+        if labels_sorted[i] == 1:
+            tp += 1
+        else:
+            fp += 1
+        fpr_list.append(fp / num_neg)
+        tpr_list.append(tp / num_pos)
+
+    return np.array(fpr_list), np.array(tpr_list)
+
+
+# ---------------------------------------------------------------------------
+# Plotting functions (require matplotlib)
+# ---------------------------------------------------------------------------
+
+def plot_confusion_matrix(matrix, class_names, title, save_path):
+    """Plot and save a confusion matrix heatmap.
+
+    Args:
+        matrix: list-of-lists or 2D array, shape [n, n] (rows=GT, cols=Pred)
+        class_names: list of class name strings
+        title: plot title
+        save_path: path to save the PNG file
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    matrix = np.array(matrix, dtype=float)
+    n = len(class_names)
+
+    # Compute percentages per row (per ground-truth class)
+    row_sums = matrix.sum(axis=1, keepdims=True)
+    # Avoid division by zero
+    pct_matrix = np.where(row_sums > 0, matrix / row_sums * 100.0, 0.0)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(matrix, interpolation='nearest', cmap='Blues')
+    ax.set_title(title, fontsize=13, pad=12)
+
+    # Tick labels
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(class_names, fontsize=10)
+    ax.set_yticklabels(class_names, fontsize=10)
+    ax.set_xlabel('Predicted', fontsize=11)
+    ax.set_ylabel('True', fontsize=11)
+
+    # Annotate cells with count and percentage
+    thresh = matrix.max() / 2.0
+    for i in range(n):
+        for j in range(n):
+            count = int(matrix[i, j])
+            pct = pct_matrix[i, j]
+            color = 'white' if matrix[i, j] > thresh else 'black'
+            ax.text(j, i - 0.1, f'{count}',
+                    ha='center', va='center', fontsize=12,
+                    fontweight='bold', color=color)
+            ax.text(j, i + 0.2, f'({pct:.1f}%)',
+                    ha='center', va='center', fontsize=9, color=color)
+
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_roc_curves(fpr_tpr_data, class_names, auc_values, title, save_path):
+    """Plot and save one-vs-rest ROC curves for each class.
+
+    Args:
+        fpr_tpr_data: dict mapping class name to (fpr_array, tpr_array)
+        class_names: list of class name strings
+        auc_values: dict mapping class name to AUC float (or None)
+        title: plot title
+        save_path: path to save the PNG file
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    for idx, name in enumerate(class_names):
+        if name not in fpr_tpr_data:
+            continue
+        fpr, tpr = fpr_tpr_data[name]
+        auc_val = auc_values.get(name, None)
+        color = colors[idx % len(colors)]
+        if auc_val is not None:
+            label = f'{name} (AUC={auc_val:.3f})'
+        else:
+            label = f'{name} (AUC=N/A)'
+        ax.plot(fpr, tpr, color=color, linewidth=2, label=label)
+
+    # Diagonal reference line
+    ax.plot([0, 1], [0, 1], linestyle='--', color='gray', linewidth=1, label='Random')
+
+    ax.set_xlim([0.0, 1.0])
+    ax.set_ylim([0.0, 1.05])
+    ax.set_xlabel('False Positive Rate', fontsize=11)
+    ax.set_ylabel('True Positive Rate', fontsize=11)
+    ax.set_title(title, fontsize=13, pad=12)
+    ax.legend(loc='lower right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_per_class_metrics(per_class_data, class_names, title, save_path):
+    """Plot and save a grouped bar chart of precision, recall, and F1 per class.
+
+    Args:
+        per_class_data: list of dicts with 'precision', 'recall', 'f1' keys
+        class_names: list of class name strings
+        title: plot title
+        save_path: path to save the PNG file
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    n = len(class_names)
+    metrics = ['precision', 'recall', 'f1']
+    metric_labels = ['Precision', 'Recall', 'F1']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+
+    x = np.arange(n)
+    bar_width = 0.25
+
+    fig, ax = plt.subplots(figsize=(max(6, n * 2), 5))
+
+    for m_idx, (metric_key, metric_label, color) in enumerate(
+            zip(metrics, metric_labels, colors)):
+        values = [per_class_data[i][metric_key] for i in range(n)]
+        offset = (m_idx - 1) * bar_width
+        bars = ax.bar(x + offset, values, bar_width, label=metric_label, color=color)
+        # Add value labels on top of bars
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height() + 0.01,
+                    f'{val:.2f}', ha='center', va='bottom', fontsize=8)
+
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_names, fontsize=10)
+    ax.set_ylabel('Score', fontsize=11)
+    ax.set_title(title, fontsize=13, pad=12)
+    ax.legend(fontsize=9)
+    ax.grid(True, axis='y', alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def generate_plots(detailed_data, plot_dir):
+    """Generate all visualization plots from detailed evaluation data.
+
+    Args:
+        detailed_data: dict from evaluate() with gts, preds, and probs
+        plot_dir: directory to save plot files
+
+    Returns:
+        list of saved file paths
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+    except ImportError:
+        print("Warning: matplotlib not installed. Skipping plot generation.")
+        print("  Install with: pip install matplotlib")
+        return []
+
+    os.makedirs(plot_dir, exist_ok=True)
+    saved_paths = []
+
+    # --- Stenosis confusion matrix ---
+    try:
+        n = len(STENOSIS_CLASSES)
+        cm = [[0] * n for _ in range(n)]
+        for gt, pred in zip(detailed_data['stenosis_gts'],
+                            detailed_data['stenosis_preds']):
+            if 0 <= gt < n and 0 <= pred < n:
+                cm[gt][pred] += 1
+        path = os.path.join(plot_dir, 'confusion_stenosis.png')
+        plot_confusion_matrix(cm, STENOSIS_CLASSES,
+                              'Stenosis Degree - Confusion Matrix', path)
+        saved_paths.append(path)
+    except Exception as e:
+        print(f"Warning: Failed to plot stenosis confusion matrix: {e}")
+
+    # --- Plaque confusion matrix ---
+    try:
+        if len(detailed_data['plaque_gts']) > 0:
+            n = len(PLAQUE_CLASSES)
+            cm = [[0] * n for _ in range(n)]
+            for gt, pred in zip(detailed_data['plaque_gts'],
+                                detailed_data['plaque_preds']):
+                if 0 <= gt < n and 0 <= pred < n:
+                    cm[gt][pred] += 1
+            path = os.path.join(plot_dir, 'confusion_plaque.png')
+            plot_confusion_matrix(cm, PLAQUE_CLASSES,
+                                  'Plaque Composition - Confusion Matrix', path)
+            saved_paths.append(path)
+    except Exception as e:
+        print(f"Warning: Failed to plot plaque confusion matrix: {e}")
+
+    # --- Stenosis per-class metrics ---
+    try:
+        stenosis_pc = compute_per_class_metrics(
+            detailed_data['stenosis_gts'], detailed_data['stenosis_preds'],
+            STENOSIS_CLASSES)
+        path = os.path.join(plot_dir, 'per_class_stenosis.png')
+        plot_per_class_metrics(stenosis_pc, STENOSIS_CLASSES,
+                               'Stenosis Degree - Per-Class Metrics', path)
+        saved_paths.append(path)
+    except Exception as e:
+        print(f"Warning: Failed to plot stenosis per-class metrics: {e}")
+
+    # --- Plaque per-class metrics ---
+    try:
+        if len(detailed_data['plaque_gts']) > 0:
+            plaque_pc = compute_per_class_metrics(
+                detailed_data['plaque_gts'], detailed_data['plaque_preds'],
+                PLAQUE_CLASSES)
+            path = os.path.join(plot_dir, 'per_class_plaque.png')
+            plot_per_class_metrics(plaque_pc, PLAQUE_CLASSES,
+                                   'Plaque Composition - Per-Class Metrics', path)
+            saved_paths.append(path)
+    except Exception as e:
+        print(f"Warning: Failed to plot plaque per-class metrics: {e}")
+
+    # --- Stenosis ROC curves ---
+    try:
+        if (detailed_data['stenosis_probs'] and
+                len(detailed_data['stenosis_probs']) > 0):
+            stenosis_prob_array = np.array(detailed_data['stenosis_probs'])
+            gt_array = np.array(detailed_data['stenosis_gts'])
+            stenosis_auc = compute_auc_ovr(
+                detailed_data['stenosis_gts'], stenosis_prob_array,
+                STENOSIS_CLASSES)
+            fpr_tpr = {}
+            for i, name in enumerate(STENOSIS_CLASSES):
+                binary_gt = (gt_array == i).astype(int)
+                if binary_gt.sum() > 0 and binary_gt.sum() < len(binary_gt):
+                    fpr, tpr = _compute_roc_points(binary_gt,
+                                                   stenosis_prob_array[:, i])
+                    fpr_tpr[name] = (fpr, tpr)
+            path = os.path.join(plot_dir, 'roc_stenosis.png')
+            plot_roc_curves(fpr_tpr, STENOSIS_CLASSES, stenosis_auc,
+                            'Stenosis Degree - ROC Curves (OvR)', path)
+            saved_paths.append(path)
+    except Exception as e:
+        print(f"Warning: Failed to plot stenosis ROC curves: {e}")
+
+    # --- Plaque ROC curves ---
+    try:
+        if (detailed_data['plaque_probs'] and
+                len(detailed_data['plaque_probs']) > 0):
+            plaque_prob_array = np.array(detailed_data['plaque_probs'])
+            gt_array = np.array(detailed_data['plaque_gts'])
+            plaque_auc = compute_auc_ovr(
+                detailed_data['plaque_gts'], plaque_prob_array, PLAQUE_CLASSES)
+            fpr_tpr = {}
+            for i, name in enumerate(PLAQUE_CLASSES):
+                binary_gt = (gt_array == i).astype(int)
+                if binary_gt.sum() > 0 and binary_gt.sum() < len(binary_gt):
+                    fpr, tpr = _compute_roc_points(binary_gt,
+                                                   plaque_prob_array[:, i])
+                    fpr_tpr[name] = (fpr, tpr)
+            path = os.path.join(plot_dir, 'roc_plaque.png')
+            plot_roc_curves(fpr_tpr, PLAQUE_CLASSES, plaque_auc,
+                            'Plaque Composition - ROC Curves (OvR)', path)
+            saved_paths.append(path)
+    except Exception as e:
+        print(f"Warning: Failed to plot plaque ROC curves: {e}")
+
+    return saved_paths
+
+
 def main():
     args = parse_args()
 
@@ -1316,6 +1630,23 @@ def main():
 
     # Print results
     print_results(stenosis_metrics, plaque_metrics, sc_metrics, detailed_data)
+
+    # Generate plots if requested
+    if args.plot:
+        if detailed_data is None:
+            print("Warning: --plot requires --detailed to generate plots. "
+                  "Re-run with --detailed --plot.")
+        else:
+            try:
+                saved = generate_plots(detailed_data, args.plot_dir)
+                if saved:
+                    print(f"\nPlots saved to {args.plot_dir}/:")
+                    for p in saved:
+                        print(f"  {p}")
+                else:
+                    print("\nNo plots were generated.")
+            except Exception as e:
+                print(f"Warning: Plot generation failed: {e}")
 
     # Save results to JSON if requested
     if args.save_results:

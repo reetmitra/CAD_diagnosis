@@ -101,6 +101,15 @@
 - `--save_results` flag: exports all metrics to JSON file
 - `--ensemble ckpt1.pth ckpt2.pth ...`: averages softmax predictions across multiple models, combines with TTA
 
+### Visualization Plots
+
+- `--plot` flag in `eval.py`: generates matplotlib visualization PNGs (requires `--detailed`)
+- `--plot_dir` (default: `./plots`): output directory for generated plots
+- Confusion matrix heatmaps: annotated cells with counts and row-normalized percentages, `Blues` colormap
+- ROC curves: one-vs-rest per class with AUC in legend, diagonal reference line
+- Per-class bar charts: grouped precision/recall/F1 bars for stenosis and plaque tasks
+- Helper `_compute_roc_points()`: manual FPR/TPR computation (no sklearn dependency)
+
 ---
 
 ## Implemented Changes (Prior)

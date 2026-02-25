@@ -359,6 +359,7 @@ Additional low-effort, high-impact improvements:
 | AUC-ROC | `eval.py` | One-vs-rest AUC per class using sklearn (with try/except fallback). Requires `--detailed`. |
 | Result Saving | `eval.py` | `--save_results` saves all metrics to JSON for easy run comparison. |
 | Ensemble Inference | `eval.py` | `--ensemble ckpt1.pth ckpt2.pth ...` averages softmax predictions across multiple models. Combines with TTA. |
+| Visualization Plots | `eval.py` | `--plot` and `--plot_dir` flags generate matplotlib PNGs: confusion matrix heatmaps (annotated, normalized), one-vs-rest ROC curves with AUC, per-class precision/recall/F1 bar charts. Requires `--detailed`. |
 
 ---
 
