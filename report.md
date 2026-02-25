@@ -332,6 +332,19 @@ Added comprehensive training visualization via TensorBoard:
 
 This replaces stdout-only logging and enables visual diagnosis of training dynamics (e.g., which loss term dominates, attention collapse, learning rate schedule effects).
 
+#### 5.7 Remaining CHANGELOG Improvements (Commit `a313e27`)
+
+Implemented all remaining future development items in a single batch:
+
+| Feature | File(s) | Details |
+|---------|---------|---------|
+| Test-Time Augmentation | `eval.py` | `--tta` flag with depth flip + intensity transforms, averages softmax probs across K+1 versions |
+| SC Loss Class Weighting | `optimization.py` | `compute_sc_class_weights()`: background=0.5, lesion=1.5. Registered as buffer for device transfer. `--sc_class_weight` flag (default on) |
+| Delta CLI Argument | `optimization.py`, `train.py` | `--delta` (default 1.0) controls contrastive loss weight. Stored as `self.delta` in `spatio_temporal_contrast_loss` |
+| YAML Config System | `train.py`, `configs/` | `--config` flag loads YAML defaults, CLI args override. Example configs: `pretrain_default.yaml`, `finetune_default.yaml`, `sweep_example.yaml` |
+| Cross-Validation | `cross_validate.py`, `augmentation.py` | Patient-level k-fold (no leakage), `file_indices` param for flexible splits, reports mean ± std |
+| Transformer Tuning | `train.py`, `framework.py` | `--temporal_encoder_layers`, `--temporal_heads`, `--spatial_encoder_layers`, `--spatial_decoder_layers` CLI args |
+
 ---
 
 ## Key Architecture Details
@@ -722,15 +735,13 @@ Temperature `τ` controls smoothness: `τ=1` is standard softmax, `τ>1` produce
 
 **Expected impact:** Better lesion detection in anatomically complex regions where views differ significantly in informativeness.
 
-#### 3.4 Test-Time Augmentation (TTA)
+#### 3.4 Test-Time Augmentation (TTA) — IMPLEMENTED (Phase 5)
 
-**What:** During inference, run the model multiple times on augmented versions of the same input (flipped, rotated) and average the predictions.
+**What:** During inference, run the model multiple times on augmented versions of the same input and average the predictions.
 
-**Why:** This is a low-effort accuracy boost that requires no retraining. For medical imaging where individual predictions have clinical consequences, TTA reduces prediction variance and catches lesions that might be missed in a single orientation.
+**Implementation (completed):** Added `--tta` flag and `--tta_k` (default 5) to `eval.py`. Augmentations: depth flip, intensity scale (±5%), intensity shift (±0.02 normalized). For depth-flipped predictions, SC logits are flipped back along the sequence dimension before averaging. Box predictions use the original (unaugmented) pass only. All transforms are normalization-invariant (no scipy rotation at inference).
 
-**Implementation approach:** For each test sample, generate K augmented versions (e.g., original + depth-flipped + 2 rotations = 4 versions). Run inference on all K, reverse the augmentation on the outputs (un-flip boxes, un-rotate coordinates), and average the class probabilities. For boxes, apply NMS or weighted box fusion across the K sets.
-
-**Expected impact:** Typically 1–3% improvement in recall (fewer missed lesions) with modest impact on precision.
+**Expected impact:** 1–3% improvement in recall with reduced prediction variance.
 
 ---
 
@@ -754,13 +765,11 @@ Temperature `τ` controls smoothness: `τ=1` is standard softmax, `τ>1` produce
 
 **Implementation:** Create config files for each ablation. For branch removal, add flags to `spatio_temporal_semantic_learning` to disable one branch and return dummy outputs. For L_dc removal, `delta=0` already works.
 
-#### 4.2 Cross-Validation
+#### 4.2 Cross-Validation — IMPLEMENTED (Phase 5)
 
 **What:** K-fold cross-validation instead of a single fixed train/val/test split.
 
-**Why:** With only 218 patients (paper) or ~665 arteries (current dataset), a single split may not be representative. Results can vary significantly depending on which patients end up in the test set. 5-fold cross-validation provides confidence intervals and more reliable performance estimates.
-
-**Implementation:** Split at the patient level (not artery level) to prevent data leakage between folds. Report mean ± standard deviation across folds.
+**Implementation (completed):** Created `cross_validate.py` with `PatientKFoldSplitter` that extracts patient IDs from filenames (`filename.rsplit('_', 1)[0]`), groups arteries by patient, and implements manual k-fold splitting (no sklearn dependency). Tested with actual dataset: 2,961 files across 797 patients. Added `file_indices` parameter to `cubic_sequence_data` to support flexible fold-based splitting. CLI args: `--n_folds` (default 5), `--cv_seed` (default 42). Prints mean ± std for all metrics across folds.
 
 #### 4.3 TensorBoard Integration — IMPLEMENTED (Phase 5)
 

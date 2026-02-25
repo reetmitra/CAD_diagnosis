@@ -46,6 +46,38 @@
 - Logging: per-epoch losses (total, training, validation), component losses (L_od, L_sc, L_dc), validation metrics (Stenosis ACC/F1, Plaque ACC/F1), LR schedules, gradient norms
 - New CLI args: `--log_dir` (default: `runs/`), `--log_every` (logging frequency)
 
+### Test-Time Augmentation (`a313e27`)
+
+- Added `--tta` flag and `--tta_k` (default 5) to `eval.py`
+- Augmentations: depth flip, intensity scale (±5%), intensity shift (±0.02 normalized)
+- Depth-flipped SC logits flipped back before averaging; box predictions from original pass only
+
+### SC Loss Class Weighting & Delta Tuning (`a313e27`)
+
+- Added `compute_sc_class_weights()` to `optimization.py` (background=0.5, lesion=1.5)
+- Class weights registered as buffer for automatic device transfer
+- `--sc_class_weight` flag (default on), `--no_sc_class_weight` to disable
+- Exposed `--delta` CLI arg (default 1.0) for contrastive loss weighting
+- Delta stored as `self.delta` in `spatio_temporal_contrast_loss` constructor
+
+### YAML Config System (`a313e27`)
+
+- Added `--config` CLI arg to `train.py` for loading YAML config files
+- YAML values serve as defaults; CLI args override
+- Created `configs/pretrain_default.yaml`, `configs/finetune_default.yaml`, `configs/sweep_example.yaml`
+
+### Cross-Validation (`a313e27`)
+
+- Created `cross_validate.py` with patient-level k-fold splitting
+- `PatientKFoldSplitter` extracts patient IDs, groups arteries, implements manual k-fold (no sklearn)
+- Added `file_indices` parameter to `cubic_sequence_data` for flexible fold-based splits
+- CLI args: `--n_folds` (default 5), `--cv_seed` (default 42)
+
+### Transformer Hyperparameter Tuning (`a313e27`)
+
+- Exposed `--temporal_encoder_layers`, `--temporal_heads`, `--spatial_encoder_layers`, `--spatial_decoder_layers` as CLI args
+- Overrides applied at runtime in `framework.py`, `DefaultConfig` unchanged
+
 ---
 
 ## Implemented Changes (Prior)
@@ -130,32 +162,23 @@
 
 ### Medium Priority
 
-**1. Transformer Configuration Tuning**
-- Current: 4 encoder + 4 decoder layers (8 total, heavy for limited data)
-- Consider reducing to 3+3 or 2+2 for pre-training, then scaling up for fine-tuning
-- Add dropout tuning (currently fixed at 0.1)
-
-**2. Parallel 2D/3D Feature Streams**
+**1. Parallel 2D/3D Feature Streams**
 - Currently the 2D branch takes 3D features as input after level 0 (interleaved)
 - Paper describes independent parallel paths that fuse after extraction
 - Implementing true parallel streams may improve feature diversity
 
-### Lower Priority
-
-**3. Test-Time Augmentation (TTA)**
-- Average predictions across flipped/rotated versions of input
-- Low-effort accuracy boost at inference time
-
-**4. Cross-Validation**
-- Current 80/20 fixed split may not be robust with small datasets
-- Implement k-fold cross-validation for more reliable performance estimates
-
-**5. Model Compression**
+**2. Model Compression**
 - Knowledge distillation from the full model to a smaller variant
 - Pruning unused attention heads in the transformer
 - Important for potential clinical deployment
 
-**6. Vessel-Aware Preprocessing**
+**3. Vessel-Aware Preprocessing**
 - Centerline extraction and straightening before feeding to the model
 - Adaptive cube sampling based on vessel curvature rather than fixed step size
 - Could significantly improve the temporal branch's ability to capture lesion context
+
+### Previously Listed — Now Implemented
+
+- ~~Transformer Configuration Tuning~~ — CLI args for layer/head counts (commit `a313e27`)
+- ~~Test-Time Augmentation~~ — `--tta` flag in eval.py (commit `a313e27`)
+- ~~Cross-Validation~~ — `cross_validate.py` with patient-level k-fold (commit `a313e27`)
