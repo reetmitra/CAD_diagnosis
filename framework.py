@@ -113,13 +113,27 @@ class sc_net_framework:
     def pre_training_load(self):
 
         model_dict = self.model.state_dict()
-        pretrained_dict = torch.load(self.state_dict_root, map_location='cpu')
+        pretrained_dict = torch.load(self.state_dict_root, map_location='cpu',
+                                     weights_only=False)
+
+        # Handle checkpoints saved by Trainer (wrapped under 'model_state_dict')
+        if 'model_state_dict' in pretrained_dict:
+            pretrained_dict = pretrained_dict['model_state_dict']
 
         pretrained_dict_filtered = {}
+        skipped = []
         for k, v in pretrained_dict.items():
             if k in model_dict:
                 if v.shape == model_dict[k].shape:
                     pretrained_dict_filtered[k] = v
+                else:
+                    skipped.append(f"{k}: pretrained {list(v.shape)} vs model {list(model_dict[k].shape)}")
 
         model_dict.update(pretrained_dict_filtered)
         self.model.load_state_dict(model_dict)
+
+        print(f"[pre_training_load] Loaded {len(pretrained_dict_filtered)}/{len(model_dict)} parameters")
+        if skipped:
+            print(f"[pre_training_load] Skipped {len(skipped)} mismatched layers:")
+            for s in skipped:
+                print(f"  - {s}")

@@ -21,6 +21,7 @@ import sys
 import argparse
 import time
 import copy
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -28,6 +29,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+
+from torch.utils.tensorboard import SummaryWriter
 
 from framework import sc_net_framework
 from config import opt
@@ -91,6 +94,11 @@ def parse_args():
 
     parser.add_argument('--augment', action='store_true',
                         help='Enable data augmentation for the training set')
+
+    parser.add_argument('--log_dir', type=str, default='./runs',
+                        help='Base directory for TensorBoard logs')
+    parser.add_argument('--log_every', type=int, default=10,
+                        help='Log batch-level metrics every N batches')
 
     args = parser.parse_args()
 
@@ -166,6 +174,15 @@ class Trainer:
         # ---- bookkeeping ----
         self.start_epoch = 0
         self.best_val_loss = float('inf')
+        self.global_step = 0
+
+        # ---- TensorBoard ----
+        self.writer = None
+        if self.is_main:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_subdir = os.path.join(args.log_dir,
+                                      f'{args.pattern}_{timestamp}')
+            self.writer = SummaryWriter(log_dir=log_subdir)
 
         # ---- resume ----
         if args.resume:
@@ -318,12 +335,15 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def train_one_epoch(self, epoch):
-        """Run one training epoch. Returns average loss."""
+        """Run one training epoch. Returns (avg_loss, avg_od, avg_sc, avg_dc)."""
         self.model.train()
         if self.train_sampler is not None:
             self.train_sampler.set_epoch(epoch)
 
         total_loss = 0.0
+        total_od = 0.0
+        total_sc = 0.0
+        total_dc = 0.0
         num_batches = 0
 
         for batch_idx, (images, targets) in enumerate(self.train_loader):
@@ -342,8 +362,10 @@ class Trainer:
 
                 if self.args.grad_clip > 0:
                     self.scaler.unscale_(self.optimizer)
-                    nn.utils.clip_grad_norm_(self.model.parameters(),
-                                             self.args.grad_clip)
+                    grad_norm = nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.args.grad_clip)
+                else:
+                    grad_norm = self._compute_grad_norm()
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -355,8 +377,10 @@ class Trainer:
                 loss.backward()
 
                 if self.args.grad_clip > 0:
-                    nn.utils.clip_grad_norm_(self.model.parameters(),
-                                             self.args.grad_clip)
+                    grad_norm = nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.args.grad_clip)
+                else:
+                    grad_norm = self._compute_grad_norm()
 
                 self.optimizer.step()
 
@@ -364,17 +388,45 @@ class Trainer:
             if self.ema is not None:
                 self.ema.update(self.model)
 
-            total_loss += loss.item()
+            batch_loss = loss.item()
+            batch_od = loss_dict['od'].item()
+            batch_sc = loss_dict['sc'].item()
+            batch_dc = loss_dict['dc'].item()
+
+            total_loss += batch_loss
+            total_od += batch_od
+            total_sc += batch_sc
+            total_dc += batch_dc
             num_batches += 1
+            self.global_step += 1
+
+            # Per-batch TensorBoard logging
+            if self.writer is not None and (batch_idx + 1) % self.args.log_every == 0:
+                self.writer.add_scalar('Batch/loss', batch_loss,
+                                       self.global_step)
+                self.writer.add_scalar('Batch/grad_norm',
+                                       grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm,
+                                       self.global_step)
 
             if self.is_main and (batch_idx + 1) % self.args.print_every == 0:
                 avg_loss = total_loss / num_batches
                 print(f"  Epoch [{epoch}] Batch [{batch_idx + 1}/{len(self.train_loader)}] "
-                      f"Loss: {loss.item():.4f} (OD: {loss_dict['od'].item():.4f} "
-                      f"SC: {loss_dict['sc'].item():.4f} DC: {loss_dict['dc'].item():.4f}) "
+                      f"Loss: {batch_loss:.4f} (OD: {batch_od:.4f} "
+                      f"SC: {batch_sc:.4f} DC: {batch_dc:.4f}) "
                       f"Avg: {avg_loss:.4f}")
 
-        return total_loss / max(num_batches, 1)
+        n = max(num_batches, 1)
+        return total_loss / n, total_od / n, total_sc / n, total_dc / n
+
+    def _compute_grad_norm(self):
+        """Compute total gradient L2 norm across all parameters."""
+        params = [p for p in self.model.parameters()
+                  if p.grad is not None]
+        if len(params) == 0:
+            return 0.0
+        total_norm = torch.norm(
+            torch.stack([torch.norm(p.grad.detach(), 2) for p in params]), 2)
+        return total_norm
 
     # ------------------------------------------------------------------
     # validation
@@ -464,7 +516,7 @@ class Trainer:
         if self.ema is not None:
             self.ema.restore(self.model)
 
-        return val_loss
+        return val_loss, stenosis_metrics, plaque_metrics
 
     # ------------------------------------------------------------------
     # main loop
@@ -483,8 +535,8 @@ class Trainer:
         for epoch in range(self.start_epoch, self.args.epochs):
             epoch_start = time.time()
 
-            train_loss = self.train_one_epoch(epoch)
-            val_loss = self.validate(epoch)
+            train_loss, train_od, train_sc, train_dc = self.train_one_epoch(epoch)
+            val_loss, stenosis_metrics, plaque_metrics = self.validate(epoch)
 
             self.scheduler.step()
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -494,6 +546,36 @@ class Trainer:
                 print(f"Epoch [{epoch}/{self.args.epochs}] "
                       f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
                       f"LR: {current_lr:.6f} | Time: {elapsed:.1f}s")
+
+                # ---- TensorBoard epoch-level logging ----
+                if self.writer is not None:
+                    self.writer.add_scalar('Loss/train', train_loss, epoch)
+                    self.writer.add_scalar('Loss/val', val_loss, epoch)
+                    self.writer.add_scalar('Loss/train_od', train_od, epoch)
+                    self.writer.add_scalar('Loss/train_sc', train_sc, epoch)
+                    self.writer.add_scalar('Loss/train_dc', train_dc, epoch)
+
+                    self.writer.add_scalar('Metrics/stenosis_acc',
+                                           stenosis_metrics['acc'], epoch)
+                    self.writer.add_scalar('Metrics/stenosis_f1',
+                                           stenosis_metrics['f1'], epoch)
+                    self.writer.add_scalar('Metrics/plaque_acc',
+                                           plaque_metrics['acc'], epoch)
+                    self.writer.add_scalar('Metrics/plaque_f1',
+                                           plaque_metrics['f1'], epoch)
+
+                    self.writer.add_scalar('LR/learning_rate',
+                                           current_lr, epoch)
+
+                    # Per-group LRs when layer-wise LR is enabled
+                    if self.args.layerwise_lr:
+                        for pg in self.optimizer.param_groups:
+                            if 'name' in pg:
+                                self.writer.add_scalar(
+                                    f'LR/lr_{pg["name"]}',
+                                    pg['lr'], epoch)
+
+                    self.writer.flush()
 
                 # Save best model
                 if val_loss < self.best_val_loss:
@@ -516,6 +598,10 @@ class Trainer:
                 os.path.join(self.args.checkpoint_dir, 'final_model.pth'),
             )
             print(f"\nTraining complete. Best val loss: {self.best_val_loss:.4f}")
+
+        # ---- cleanup ----
+        if self.writer is not None:
+            self.writer.close()
 
         if self.distributed:
             dist.destroy_process_group()
@@ -548,6 +634,8 @@ class Trainer:
         print(f"  Augmentation:     {self.args.augment}")
         print(f"  Num classes:      {self.num_classes}")
         print(f"  Parameters:       {total_params:,} total, {trainable_params:,} trainable")
+        if self.writer is not None:
+            print(f"  TensorBoard:      {self.writer.log_dir}")
         print("=" * 60)
 
 

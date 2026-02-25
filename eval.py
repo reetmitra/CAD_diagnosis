@@ -86,7 +86,9 @@ def od_predictions_to_artery_level(od_outputs, num_classes):
 
     Returns:
         stenosis_pred: int (0=healthy, 1=non-significant, 2=significant)
-        plaque_pred: int (0=calcified, 1=non-calcified, 2=mixed, -1=none)
+        plaque_pred: int (0/1/2 = plaque composition group, -1=none)
+            For num_classes=3: 0=calcified, 1=non-calcified, 2=mixed
+            For num_classes=6: class//2 gives group (0, 1, 2)
     """
     pred_logits = od_outputs['pred_logits']  # [num_queries, num_classes+1]
 
@@ -121,18 +123,21 @@ def od_predictions_to_artery_level(od_outputs, num_classes):
             return 0, -1
 
     # For 6-class fine-tuning:
-    # Classes 0-2: non-significant stenosis (calcified/non-calcified/mixed)
-    # Classes 3-5: significant stenosis (calcified/non-calcified/mixed)
+    #   Raw labels 1-2 -> classes 0-1: non-significant stenosis
+    #   Raw labels 3-4 -> classes 2-3: significant stenosis (plaque group B)
+    #   Raw labels 5-6 -> classes 4-5: significant stenosis (plaque group C)
+    # Stenosis: classes 0-1 = non-significant, classes 2-5 = significant
+    # Plaque:   class // 2 gives plaque group (0, 1, 2) — three compositions
     if num_classes == 6:
-        # Stenosis degree
-        if (object_classes >= 3).any():
+        # Stenosis degree: classes >= 2 means significant
+        if (object_classes >= 2).any():
             stenosis_pred = 2  # significant
         else:
             stenosis_pred = 1  # non-significant
 
-        # Plaque composition: extract plaque type from class index
-        # Class 0,3 = calcified; Class 1,4 = non-calcified; Class 2,5 = mixed
-        plaque_types = object_classes % 3
+        # Plaque composition: extract plaque group from class index
+        # Classes 0-1 -> group 0, classes 2-3 -> group 1, classes 4-5 -> group 2
+        plaque_types = object_classes // 2
         # Use the most confident detection for plaque type
         if object_scores is not None and len(object_scores) > 1:
             best_idx = object_scores.argmax()
@@ -173,11 +178,13 @@ def targets_to_artery_level(targets, num_classes):
 
     # Same logic as predictions
     if num_classes == 6:
-        if (labels >= 3).any():
+        # Classes >= 2 (raw labels 3-6) are significant stenosis
+        if (labels >= 2).any():
             stenosis_gt = 2  # significant
         else:
             stenosis_gt = 1  # non-significant
-        plaque_types = labels % 3
+        # Plaque group: class // 2 -> 0, 1, or 2
+        plaque_types = labels // 2
         plaque_gt = plaque_types[0].item()
     elif num_classes == 3:
         stenosis_gt = 1
@@ -408,7 +415,8 @@ def main():
             pattern='testing',
             train_ratio=opt.data_params["train_ratio"],
             input_shape=opt.net_params["input_shape"],
-            window=opt.data_params["window_lw"])
+            window=opt.data_params["window_lw"],
+            num_classes=num_classes)
         dataset_test.data_start = 0
         dataset_test.data_end = dataset_test.file_total
         dataset_test.length = dataset_test.file_total

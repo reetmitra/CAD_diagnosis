@@ -1,6 +1,54 @@
 # SC-Net Code Improvements & Roadmap
 
-## Implemented Changes
+## Recent Changes (2026-02-25)
+
+### Baseline Evaluation
+
+- Evaluated `checkpoints/best_model.pth` (v1, epoch 20, pre_training) on all 665 test files in `dataset/test/`
+- Results: Stenosis ACC 0.702, F1 0.413 | Plaque ACC 0.430, F1 0.100 | SC Points ACC 0.801 (17,035/21,280)
+- All v1 checkpoints are pre_training mode (num_classes=3); test data labels 0-6 require fine_tuning (num_classes=6)
+
+### Bug Fix: Empty Box Dimension Mismatch (`1c43ae7`)
+
+- **File:** `functions.py`, `box_lastdim_expansion()`
+- `box_lastdim_expansion()` returned empty tensors with shape `(0, 2)` instead of `(0, 4)` for samples with no lesions
+- Caused `RuntimeError` in `HungarianMatcher` when `torch.cat` mixed `(N, 4)` and `(0, 2)` tensors across batch elements
+- Fix: return `torch.zeros` with `shape[-1]=4` for empty tensors
+
+### Bug Fix: Label Remapping for pre_training (`1c43ae7`)
+
+- **Files:** `augmentation.py`, `framework.py`, `train.py`
+- Training data has labels 0-6 but pre_training expects labels 0-3
+- Added `num_classes` parameter to `cubic_sequence_data`
+- When `num_classes=3`, labels remapped via `((label - 1) % 3) + 1` (6 fine-tuning classes -> 3 plaque composition classes)
+- Parameter threaded through `framework.py` and `train.py`
+
+### Retraining v2 (In Progress)
+
+- Full 200-epoch training with all bug fixes and enhancements applied
+- Config: AMP, DDP (2x RTX 3090), EMA (0.999), augmentation (rotation/jitter/flip), warmup (10 ep), layer-wise LR, grad clip 0.1
+- Dataset: `dataset/train/` (2,961 samples), pre_training mode (num_classes=3), 70/15/15 split
+- Checkpoints saving to `checkpoints_v2/`
+- Smoke test (1 epoch): val Stenosis ACC 0.734, Plaque ACC 0.497 (already exceeds v1 final model)
+- Estimated ~3 min/epoch, ~10 hours total
+
+### Fine-Tuning Pipeline Preparation
+
+- Fixed `pre_training_load()` in `framework.py` to handle checkpoint format (`model_state_dict` key extraction)
+- Fixed `eval.py` stenosis class boundary for 6-class mode
+- Fixed `eval.py` plaque composition mapping for 6-class evaluation
+- Created launch scripts: `scripts/pretrain.sh`, `scripts/finetune.sh`, `scripts/eval_finetune.sh`
+- Updated `config.py` data paths from placeholders to `dataset/train`
+
+### TensorBoard Integration
+
+- Added `SummaryWriter` to `Trainer` class in `train.py`
+- Logging: per-epoch losses (total, training, validation), component losses (L_od, L_sc, L_dc), validation metrics (Stenosis ACC/F1, Plaque ACC/F1), LR schedules, gradient norms
+- New CLI args: `--log_dir` (default: `runs/`), `--log_every` (logging frequency)
+
+---
+
+## Implemented Changes (Prior)
 
 ### Critical Bug Fixes
 

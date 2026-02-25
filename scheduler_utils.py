@@ -107,10 +107,10 @@ def build_param_groups(
 
     param_groups = []
     if backbone_params:
-        param_groups.append({"params": backbone_params, "lr": 0.1 * base_lr})
+        param_groups.append({"params": backbone_params, "lr": 0.1 * base_lr, "name": "backbone"})
     if transformer_params:
-        param_groups.append({"params": transformer_params, "lr": 0.5 * base_lr})
+        param_groups.append({"params": transformer_params, "lr": 0.5 * base_lr, "name": "transformer"})
     if head_params:
-        param_groups.append({"params": head_params, "lr": 1.0 * base_lr})
+        param_groups.append({"params": head_params, "lr": 1.0 * base_lr, "name": "heads"})
 
     return param_groups
