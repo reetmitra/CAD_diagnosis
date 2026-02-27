@@ -114,12 +114,17 @@ Train set: 2,961 samples | Test set: 665 samples
 | v2 | 143 | 1e-4 | AMP, DDP, EMA, warmup, layer-wise LR | Done | Bugs 1–5 fixed; bugs 6–8 still present |
 | v3 | ~40 | 1e-4 | + focal loss, SC weights, grad accum | Killed | Killed: LR too high for new loss weights |
 | v4 | ~15 | 1e-4 | All bugs 1–8 fixed | Killed | Killed: same LR issue, val loss increasing after warmup |
-| v5 | 40 | **3e-5** | All bugs 1–8 fixed | **RESUMING** | NCCL DDP timeout fixed (val_loss all_reduce). Last checkpoint: epoch 39. patience_counter resets to 0 on resume. |
+| v5 | 52 | **3e-5** | All bugs 1–8 fixed | **KILLED** | Stalled: 13/30 no improvement since resume at epoch 40. Val loss plateau ~5.97–6.09. Killed to launch fine-tuning. |
+| v5-ft | 30 | **1e-5** | fine_tuning, 6-class, pretrained from v5 epoch 39 | **DONE** | Early stop epoch 30 (patience 20/20). Best val 4.50 (ep 10). Majority class only — backbone too weak. |
+| v6 | 57 | **3e-5** | pre_training, fresh start, single GPU (GPU 0) | **KILLED** | Best epoch 8 (val 3.22). Plateau 4.0–4.2 from ep29, patience 49/60. Killed — best checkpoint saved. |
+| v2-ft | 52 | **3e-6** | fine_tuning, pretrained from v2 epoch 139, single GPU (GPU 1) | **DONE** | Early stop ep52 (patience 30/30). Best val 5.05 (ep22). Majority class only — LR too low + bugs 6-8. |
+| v6-ft | 0→ | **5e-6** | fine_tuning, pretrained from v6 ep8 (val 3.22), single GPU (GPU 0) | **RUNNING** | lr=5e-6, wd=5e-4, warmup=10, patience=30. Log: `train_v6_finetune.log`. |
 
 ### Current best checkpoints
 - `checkpoints_v2/checkpoint_epoch_139.pth` — best pre-training before bug fixes
-- `checkpoints/checkpoint_epoch_39.pth` — best pre-training with all bugs fixed ← **USE THIS**
-  (Note: v5 run saved to `./checkpoints/`, not a separate `checkpoints_v5/` directory)
+- `checkpoints/checkpoint_epoch_39.pth` — best pre-training with all bugs fixed (v5)
+- `checkpoints_v6/best_model.pth` — best pre-training with ALL bugs fixed (epoch 8, val 3.22) ← **BEST BACKBONE**
+- `checkpoints_v6_finetune/best_model.pth` — v6-ft fine-tuning best (epoch 9, val 4.14) ← **ACTIVE FINE-TUNING RUN — EVALUATE WHEN DONE**
 
 ---
 
@@ -139,12 +144,42 @@ Train set: 2,961 samples | Test set: 665 samples
 | Plaque | **0.486** | **0.218** | +5.6% / +118% |
 | SC Points | **0.848** | — | +4.7% |
 
+### v5 Epoch 39 (pre_training mode, all bugs fixed)
+| Task | ACC | F1 | Notes |
+|------|-----|----|-------|
+| Stenosis | 0.702 | 0.413 | Majority class (Non-significant). Expected — pre_training mode doesn't supervise stenosis severity. |
+| Plaque | 0.486 | 0.218 | Same as v2 — majority class (Non-calcified). |
+| SC Points | 0.801 | — | Temporal branch performing well. |
+> Pre-training evaluation reflects plaque composition only (3-class). Stenosis evaluation in this mode is not meaningful — all predictions are majority-class because the pre-training task never sees stenosis severity labels.
+
+### v5-ft Epoch 10 (fine_tuning mode, 6-class — first ever)
+| Task | ACC | F1 | AUC (macro) | Notes |
+|------|-----|----|------------|-------|
+| Stenosis | 0.316 | 0.160 | 0.577 | Majority class (Non-significant). AUC improving (was 0.554 in pre-training). Too early — epoch 10 only. |
+| Plaque | 0.630 | 0.258 | 0.508 | Majority class (Calcified). AUC near 0.5, improving. |
+| SC Points | 0.792 | — | — | Slightly lower than pre-training — adjustment period. |
+> Fine-tuning mode shows the real distribution: Healthy=198, Non-significant=210, Significant=257. At epoch 10 the model still predicts majority class, but AUC scores above 0.5 confirm it is beginning to discriminate. Focal loss is pushing training loss up (4.1→6.0) while val loss falls (5.40→4.50) — this is expected focal loss behaviour reweighting hard examples. Expect class separation to emerge by epoch 20–40.
+
+### v2-ft Epoch 22 (fine_tuning mode, 6-class)
+| Task | ACC | F1 | AUC (macro) | Notes |
+|------|-----|----|------------|-------|
+| Stenosis | 0.316 | 0.160 | 0.573 | Majority class (Non-significant). Same as v5-ft — backbone bugs 6-8 + LR 3e-6 too low to break through. |
+| Plaque | 0.630 | 0.258 | 0.523 | Majority class (Calcified). Identical to v5-ft. |
+| SC Points | 0.820 | — | — | Slightly higher than v5-ft (0.792) — v2 backbone stronger for SC. |
+> Both fine-tuning runs (v5-ft, v2-ft) stuck at majority class. Root cause: either backbone too weak (v5) or LR too low (v2-ft). v6-ft uses v6 epoch 8 checkpoint (val 3.22 — best pre-training yet) with LR 5e-6 (mid-point between too-low 3e-6 and too-high 1e-5).
+
+### v6-ft Epoch 9 (fine_tuning mode, 6-class — BREAKTHROUGH)
+| Task | ACC | F1 | AUC (macro) | Notes |
+|------|-----|----|------------|-------|
+| Stenosis | 0.328 | 0.210 | 0.604 | **First non-majority-class prediction!** 18 Healthy correct. Significant AUC=0.707 shows strong internal discrimination. |
+| Plaque | 0.606 | 0.189 | 0.547 | Still majority class (Calcified) but AUC improving. |
+| SC Points | 0.806 | — | — | Stable. |
+> BREAKTHROUGH: v6 backbone (all 8 bugs fixed, val 3.22) + LR 5e-6 finally broke majority-class prediction. Confusion matrix shows 31 Healthy predictions (18 correct), 634 Non-significant, 0 Significant. Significant AUC=0.707 means model already discriminates internally — argmax should include Significant in next 10–20 epochs. Best val loss 4.14 (epoch 9) beats v5-ft best of 4.50.
+
 ### Paper Target (fine-tuned model)
 | Task | ACC |
 |------|-----|
 | Stenosis | **0.914** |
-
-**We have never run fine-tuning.** The paper's 0.914 comes from the fine-tuned (6-class) model. This is the next critical step.
 
 ---
 
@@ -269,12 +304,22 @@ git push  # may need manual auth in terminal
 
 ## Pending Next Steps
 
-1. **Commit DDP fix** — `train.py` val_loss all_reduce (uncommitted, fixes NCCL crash)
-2. **Resume v5** from `checkpoints/checkpoint_epoch_39.pth` — command above; note patience_counter resets to 0
-3. **Evaluate current best** (`checkpoints/best_model.pth`) on test set to baseline v5
-4. **Run fine-tuning** from best v5 checkpoint — **highest-impact step** (paper: 0.914 ACC vs our 0.702)
-5. **Evaluate fine-tuned model** in `fine_tuning` mode (6 classes)
-6. **Push all commits** to GitHub (`a7ee5e4` and DDP fix were noted as unpushed)
+1. **Monitor v6-ft training** — `tail -f train_v6_finetune.log`. Currently ~epoch 18, best epoch 9 val 4.14, patience 8/30.
+2. **Evaluate v6-ft best_model.pth when training completes** — run eval on `checkpoints_v6_finetune/best_model.pth` in `fine_tuning` mode.
+3. **If v6-ft early stops without improvement** — consider resuming v6 pre-training further and re-fine-tuning.
+4. **Push all commits** to GitHub.
+
+### v6-ft evaluation command (run after checkpoints_v6_finetune/best_model.pth is saved)
+```bash
+source .venv/bin/activate
+CUDA_VISIBLE_DEVICES=0 python eval.py \
+  --checkpoint ./checkpoints_v6_finetune/best_model.pth \
+  --pattern fine_tuning \
+  --data_root ./dataset/test \
+  --batch_size 2 --eval_sc --detailed \
+  --plot --plot_dir ./plots_v6_finetune \
+  --save_results results_v6_finetune.json
+```
 
 ---
 

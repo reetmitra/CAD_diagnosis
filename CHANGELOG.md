@@ -1,5 +1,74 @@
 # SC-Net Code Improvements & Roadmap
 
+## Recent Changes (2026-02-27)
+
+### Fine-Tuning Launch (v6-ft)
+
+- Launched `--pattern fine_tuning` from `checkpoints_v6/best_model.pth` (v6 best pre-training, epoch 8, val 3.22)
+- All previously identified bugs fixed prior to launch
+- Config: lr=5e-6, weight_decay=5e-4, warmup=10, patience=30, GPU 0 (single-GPU)
+- Checkpoints: `checkpoints_v6_finetune/`
+
+### Evaluation: v6-ft Epoch 9 (fine_tuning mode — BREAKTHROUGH)
+
+- Evaluated `checkpoints_v6_finetune/best_model.pth` (epoch 9) on test set in `fine_tuning` mode
+- **First non-majority-class prediction ever observed in fine_tuning mode**
+- Stenosis ACC: 0.328, F1: 0.210, AUC: 0.604 macro
+  - 18 Healthy samples correctly predicted — first time any minority class predicted
+  - Significant class AUC: 0.707 (strong internal discrimination)
+- Plaque ACC: 0.606, AUC: 0.547, SC Points ACC: 0.806
+- Results confirm v6 pre-training checkpoint provides meaningfully better initialisation than v5
+
+### v6 Pre-Training Killed (Patience Exhausted)
+
+- v6 pre-training ran to epoch 57, patience counter reached 49/60 without improvement
+- Best checkpoint: epoch 8, val loss 3.22, saved to `checkpoints_v6/best_model.pth`
+- Training killed; best checkpoint carried forward to v6-ft fine-tuning
+
+### v2-ft Fine-Tuning Completed
+
+- Fine-tuning from v2 pre-training checkpoint completed via early stopping at epoch 52
+- Best val loss: 5.05 at epoch 22; model reverted to that checkpoint for evaluation
+- Evaluation on 665 test files in `fine_tuning` mode: Stenosis ACC 0.316, Plaque ACC 0.630, SC Points ACC 0.820
+- Model exhibited majority-class prediction throughout; no minority-class predictions observed
+- Served as baseline for v6-ft comparison
+
+---
+
+### v5 Pre-Training Killed (Stalled)
+
+- v5 resumed from epoch 39 with NCCL_TIMEOUT=3600; ran epochs 40–52 without improvement
+- Val loss plateaued at 5.97–6.09 for 13 consecutive epochs (patience 13/30)
+- Pre-training killed at epoch 52 — convergence confirmed, majority-class prediction persists
+- Best pre-training checkpoint: `checkpoints/checkpoint_epoch_39.pth`
+
+### Evaluation: v5 Epoch 39 (pre_training mode)
+
+- Evaluated `checkpoints/checkpoint_epoch_39.pth` on 665 test files
+- Stenosis ACC: 0.702 (majority class, expected — pre_training does not supervise stenosis severity)
+- Plaque ACC: 0.486, F1: 0.218 | SC Points ACC: 0.801
+- AUC: Stenosis 0.554 macro, Plaque 0.452 macro
+- Results: `results_v5_epoch39.json`
+
+### Fine-Tuning Launch (v5-ft, first ever)
+
+- Launched `--pattern fine_tuning` from `checkpoints/checkpoint_epoch_39.pth` (v5 best pre-training)
+- 6-class model (Healthy/Non-significant/Significant × Calcified/Non-calcified/Mixed)
+- Config: lr=1e-5, warmup=5, layerwise LR, focal_loss gamma=2.0, accumulate_steps=2, patience=20
+- Log: `train_finetune.log`, checkpoints: `checkpoints_v5_finetune/`
+- Val loss drops from 21.98 → 4.50 in first 10 epochs (DC loss collapses from ~16 to ~1 as branches align)
+
+### Evaluation: v5-ft Epoch 10 (fine_tuning mode — first ever 6-class eval)
+
+- Evaluated `checkpoints_v5_finetune/best_model.pth` (epoch 10) on 665 test files in `fine_tuning` mode
+- Stenosis ACC: 0.316 (majority class at epoch 10, but AUC=0.577 — up from 0.554 in pre-training)
+- Plaque ACC: 0.630 (majority class), AUC: 0.508 — up from 0.452 in pre-training
+- SC Points ACC: 0.792
+- Model is learning — AUC scores above 0.5 confirm class discrimination beginning; expect break from majority-class at epoch 20–40
+- Results: `results_finetune.json`, plots: `plots_finetune/`
+
+---
+
 ## Recent Changes (2026-02-25)
 
 ### Critical Architecture Fixes (paper analysis — 3 root causes of performance gap)

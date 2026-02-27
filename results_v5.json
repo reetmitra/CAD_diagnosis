@@ -1,0 +1,86 @@
+{
+  "timestamp": "2026-02-27T11:23:15.764391",
+  "checkpoint": "./checkpoints/best_model.pth",
+  "pattern": "pre_training",
+  "tta": false,
+  "tta_k": null,
+  "ensemble": false,
+  "num_ensemble_models": 1,
+  "stenosis_metrics": {
+    "acc": 0.7022556390977444,
+    "prec": 0.3511278195488722,
+    "recall": 0.5,
+    "f1": 0.4125441696113074,
+    "spec": 0.6666666666666666
+  },
+  "plaque_metrics": {
+    "acc": 0.4860813704496788,
+    "prec": 0.16202712348322626,
+    "recall": 0.3333333333333333,
+    "f1": 0.21805955811719502,
+    "spec": 0.6666666666666666
+  },
+  "sc_metrics": {
+    "acc": 0.800516917293233,
+    "total_points": 21280.0,
+    "correct_points": 17035.0
+  },
+  "stenosis_per_class": [
+    {
+      "class": "Healthy",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 198
+    },
+    {
+      "class": "Non-significant",
+      "precision": 0.7022556390977444,
+      "recall": 1.0,
+      "f1": 0.8250883392226148,
+      "support": 467
+    },
+    {
+      "class": "Significant",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 0
+    }
+  ],
+  "plaque_per_class": [
+    {
+      "class": "Calcified",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 104
+    },
+    {
+      "class": "Non-calcified",
+      "precision": 0.4860813704496788,
+      "recall": 1.0,
+      "f1": 0.6541786743515849,
+      "support": 227
+    },
+    {
+      "class": "Mixed",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 136
+    }
+  ],
+  "stenosis_auc": {
+    "Healthy": 0.602383578828975,
+    "Non-significant": 0.6023835788289751,
+    "Significant": null
+  },
+  "plaque_auc": {
+    "Calcified": 0.41902415766052126,
+    "Non-calcified": 0.4816079295154184,
+    "Mixed": 0.4567487115692198
+  },
+  "num_stenosis_samples": 665,
+  "num_plaque_samples": 467
+}

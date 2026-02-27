@@ -1,0 +1,86 @@
+{
+  "timestamp": "2026-02-27T16:00:55.233940",
+  "checkpoint": "./checkpoints_v6_finetune/best_model.pth",
+  "pattern": "fine_tuning",
+  "tta": false,
+  "tta_k": null,
+  "ensemble": false,
+  "num_ensemble_models": 1,
+  "stenosis_metrics": {
+    "acc": 0.32781954887218046,
+    "prec": 0.29870085817984465,
+    "recall": 0.3477633477633477,
+    "f1": 0.21037962982125735,
+    "spec": 0.6727721956844013
+  },
+  "plaque_metrics": {
+    "acc": 0.6059957173447538,
+    "prec": 0.15583700440528633,
+    "recall": 0.24064625850340135,
+    "f1": 0.1891711229946524,
+    "spec": 0.8548176335058537
+  },
+  "sc_metrics": {
+    "acc": 0.8061090225563909,
+    "total_points": 21280.0,
+    "correct_points": 17154.0
+  },
+  "stenosis_per_class": [
+    {
+      "class": "Healthy",
+      "precision": 0.5806451612903226,
+      "recall": 0.09090909090909091,
+      "f1": 0.15720524017467247,
+      "support": 198
+    },
+    {
+      "class": "Non-significant",
+      "precision": 0.31545741324921134,
+      "recall": 0.9523809523809523,
+      "f1": 0.4739336492890994,
+      "support": 210
+    },
+    {
+      "class": "Significant",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 257
+    }
+  ],
+  "plaque_per_class": [
+    {
+      "class": "Calcified",
+      "precision": 0.6233480176211453,
+      "recall": 1.0,
+      "f1": 0.76797829036635,
+      "support": 283
+    },
+    {
+      "class": "Non-calcified",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 126
+    },
+    {
+      "class": "Mixed",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 45
+    }
+  ],
+  "stenosis_auc": {
+    "Healthy": 0.6777734518633877,
+    "Non-significant": 0.4259131344845631,
+    "Significant": 0.707494087129015
+  },
+  "plaque_auc": {
+    "Calcified": 0.559179741260666,
+    "Non-calcified": 0.575589970501475,
+    "Mixed": 0.5063717746182201
+  },
+  "num_stenosis_samples": 665,
+  "num_plaque_samples": 467
+}
