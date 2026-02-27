@@ -114,11 +114,12 @@ Train set: 2,961 samples | Test set: 665 samples
 | v2 | 143 | 1e-4 | AMP, DDP, EMA, warmup, layer-wise LR | Done | Bugs 1–5 fixed; bugs 6–8 still present |
 | v3 | ~40 | 1e-4 | + focal loss, SC weights, grad accum | Killed | Killed: LR too high for new loss weights |
 | v4 | ~15 | 1e-4 | All bugs 1–8 fixed | Killed | Killed: same LR issue, val loss increasing after warmup |
-| v5 | 40 | **3e-5** | All bugs 1–8 fixed | **CRASHED** at epoch 40 | NCCL DDP timeout error. Last checkpoint: epoch 39. **Resume from here.** |
+| v5 | 40 | **3e-5** | All bugs 1–8 fixed | **RESUMING** | NCCL DDP timeout fixed (val_loss all_reduce). Last checkpoint: epoch 39. patience_counter resets to 0 on resume. |
 
 ### Current best checkpoints
 - `checkpoints_v2/checkpoint_epoch_139.pth` — best pre-training before bug fixes
-- `checkpoints_v5/checkpoint_epoch_39.pth` — best pre-training with all bugs fixed ← **USE THIS**
+- `checkpoints/checkpoint_epoch_39.pth` — best pre-training with all bugs fixed ← **USE THIS**
+  (Note: v5 run saved to `./checkpoints/`, not a separate `checkpoints_v5/` directory)
 
 ---
 
@@ -149,16 +150,13 @@ Train set: 2,961 samples | Test set: 665 samples
 
 ## Errors Encountered & Fixes
 
-### NCCL DDP Timeout (v5, epoch 40)
+### NCCL DDP Timeout (v5, epoch 40) — **FIXED**
 ```
 [rank0]: Exception (either an error or timeout) detected by watchdog at work: 233625
 terminate called after throwing an instance of 'c10::DistBackendError'
 ```
-**Cause:** GPU-to-GPU communication timeout in NCCL during DDP training. Common cause: one GPU stalled during a long batch.
-**Fix:** Resume from last checkpoint. Add `NCCL_TIMEOUT` env var if recurs:
-```bash
-NCCL_TIMEOUT=3600 nohup torchrun ...
-```
+**Root cause:** `validate()` returned a *local* `val_loss` computed only on each rank's shard of the eval set (via `DistributedSampler`). The early-stopping `patience_counter` was updated independently on each rank using different data, so the counters drifted. By epoch 40, rank 1's counter hit 30 (the patience limit) while rank 0's was at 29. Rank 1 broke from the training loop and called `dist.destroy_process_group()`. Rank 0 entered epoch 41 and hung at ALLREDUCE for 10 minutes before the NCCL watchdog killed it.
+**Fix applied (`train.py`, `validate()`):** After computing local `val_loss`, do `dist.all_reduce(val_loss_t, op=dist.ReduceOp.AVG)` so all ranks see the same globally-averaged validation loss before updating `patience_counter`. Both ranks now make identical stop/continue decisions.
 
 ### FocalLoss CPU/GPU Device Mismatch (v3 start)
 ```
@@ -201,8 +199,8 @@ NCCL_TIMEOUT=3600 nohup torchrun --nproc_per_node=2 train.py \
   --distributed \
   --pattern pre_training \
   --data_root ./dataset/train \
-  --checkpoint_dir ./checkpoints_v5 \
-  --resume ./checkpoints_v5/checkpoint_epoch_39.pth \
+  --checkpoint_dir ./checkpoints \
+  --resume ./checkpoints/checkpoint_epoch_39.pth \
   --epochs 200 \
   --lr 3e-5 --weight_decay 1e-4 --grad_clip 0.1 \
   --warmup_epochs 10 --layerwise_lr \
@@ -223,7 +221,7 @@ source .venv/bin/activate
 NCCL_TIMEOUT=3600 nohup torchrun --nproc_per_node=2 train.py \
   --distributed \
   --pattern fine_tuning \
-  --pretrained ./checkpoints_v5/best_model.pth \
+  --pretrained ./checkpoints/best_model.pth \
   --data_root ./dataset/train \
   --checkpoint_dir ./checkpoints_v5_finetune \
   --epochs 100 \
@@ -271,10 +269,12 @@ git push  # may need manual auth in terminal
 
 ## Pending Next Steps
 
-1. **Resume v5** from checkpoint_epoch_39.pth (add NCCL_TIMEOUT to prevent repeat crash)
-2. **Run fine-tuning** from best v5 checkpoint — this is the single most impactful step remaining (paper: 0.914 vs our 0.702)
-3. **Evaluate fine-tuned model** in `fine_tuning` mode (6 classes)
-4. **Push pending commit** `a7ee5e4` (box expansion + loss weight fixes) — network issue in Claude Code session, push manually
+1. **Commit DDP fix** — `train.py` val_loss all_reduce (uncommitted, fixes NCCL crash)
+2. **Resume v5** from `checkpoints/checkpoint_epoch_39.pth` — command above; note patience_counter resets to 0
+3. **Evaluate current best** (`checkpoints/best_model.pth`) on test set to baseline v5
+4. **Run fine-tuning** from best v5 checkpoint — **highest-impact step** (paper: 0.914 ACC vs our 0.702)
+5. **Evaluate fine-tuned model** in `fine_tuning` mode (6 classes)
+6. **Push all commits** to GitHub (`a7ee5e4` and DDP fix were noted as unpushed)
 
 ---
 

@@ -571,6 +571,15 @@ class Trainer:
 
         val_loss = total_loss / max(num_batches, 1)
 
+        # Synchronise val_loss across all ranks so early-stopping is consistent.
+        # Without this, each rank sees only its own subset of the eval set and
+        # patience_counter can diverge — one rank breaks early while the other
+        # hangs indefinitely at the next NCCL ALLREDUCE.
+        if self.distributed:
+            val_loss_t = torch.tensor(val_loss, device=self.device)
+            dist.all_reduce(val_loss_t, op=dist.ReduceOp.AVG)
+            val_loss = val_loss_t.item()
+
         # Compute classification metrics
         stenosis_metrics = compute_metrics(all_stenosis_gts, all_stenosis_preds,
                                            num_classes=3)
