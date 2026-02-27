@@ -118,7 +118,7 @@ Train set: 2,961 samples | Test set: 665 samples
 | v5-ft | 30 | **1e-5** | fine_tuning, 6-class, pretrained from v5 epoch 39 | **DONE** | Early stop epoch 30 (patience 20/20). Best val 4.50 (ep 10). Majority class only — backbone too weak. |
 | v6 | 57 | **3e-5** | pre_training, fresh start, single GPU (GPU 0) | **KILLED** | Best epoch 8 (val 3.22). Plateau 4.0–4.2 from ep29, patience 49/60. Killed — best checkpoint saved. |
 | v2-ft | 52 | **3e-6** | fine_tuning, pretrained from v2 epoch 139, single GPU (GPU 1) | **DONE** | Early stop ep52 (patience 30/30). Best val 5.05 (ep22). Majority class only — LR too low + bugs 6-8. |
-| v6-ft | 0→ | **5e-6** | fine_tuning, pretrained from v6 ep8 (val 3.22), single GPU (GPU 0) | **RUNNING** | lr=5e-6, wd=5e-4, warmup=10, patience=30. Log: `train_v6_finetune.log`. |
+| v6-ft | 30+ | **5e-6** | fine_tuning, pretrained from v6 ep8 (val 3.22), single GPU (GPU 0) | **RUNNING (will early-stop ~ep39)** | Best ep9 val 4.14, patience 21+/30. Majority-class collapse — same as v5-ft. Root cause: fixes 6–8 changed loss landscape. |
 
 ### Current best checkpoints
 - `checkpoints_v2/checkpoint_epoch_139.pth` — best pre-training before bug fixes
@@ -302,14 +302,58 @@ git push  # may need manual auth in terminal
 
 ---
 
+## Root Cause Analysis (2026-02-27)
+
+### Why the model is stuck at majority-class prediction
+
+After comparing our code against the **original paper repo** (https://github.com/PerceptionComputingLab/SC-Net), we discovered that "bug fixes" 6–8 **changed the loss landscape** relative to the paper's actual code. The paper's equations say λ_L1=5, λ_iou=2, but **the paper's code uses 1:1:1 everywhere**. Our "fixes" made the box loss ~3.5× larger than what the authors trained with, breaking convergence.
+
+| Fix # | What we changed | What the paper code actually does | Impact |
+|-------|----------------|----------------------------------|--------|
+| 6 | `box_lastdim_expansion`: `[cx,w]→[cx, 0.5, w, 1.0]` (geometrically correct) | `[cx,w]→[cx,w,cx,w]` reindexed to `[cx,cx,w,w]` (hacky but what they trained with) | **Different GIoU values → different loss landscape** |
+| 7 | `loss_boxes`: `5.0*L1 + 2.0*GIoU` (matches paper equations) | `L1 + GIoU` (1:1 weights) | **3.5× larger box loss gradient** |
+| 8 | `HungarianMatcher`: `cost_bbox=5, cost_giou=2` (matches paper equations) | `cost_class=1, cost_bbox=1, cost_giou=1` (all equal) | **Different query-to-target matching** |
+
+**Key insight:** The paper's code ≠ the paper's equations. The authors got 91.4% with their code, not their equations.
+
+### Classification of all 8 fixes
+
+**Crash fixes (1–5) — KEEP these:**
+1. Empty tensor shape in `box_lastdim_expansion` → prevents shape mismatch crash
+2. Label modulo remapping in `augmentation.py` → prevents CUDA index OOB
+3. Degenerate box clamping in `generalized_box_iou` → prevents assert crash
+4. Non-in-place box ops → prevents AMP autograd crash
+5. `FocalLoss.alpha` as registered buffer → prevents CPU/GPU device mismatch
+
+**Behavioral changes (6–8) — REVERT these to match paper code:**
+6. `box_lastdim_expansion` → revert to original expansion logic
+7. `loss_boxes` weights → revert to 1:1 (L1 + GIoU, no 5:2 scaling)
+8. `HungarianMatcher` defaults → revert to `cost_class=1, cost_bbox=1, cost_giou=1`
+
+### Additional note: head reinitialization during fine-tuning is BY DESIGN
+
+The original paper code also silently skips loading layers with shape mismatches (3-class → 6-class heads). This is intentional — classification heads are reinitialized from scratch during fine-tuning. This is NOT a bug.
+
+---
+
 ## Pending Next Steps
 
-1. **Monitor v6-ft training** — `tail -f train_v6_finetune.log`. Currently ~epoch 18, best epoch 9 val 4.14, patience 8/30.
-2. **Evaluate v6-ft best_model.pth when training completes** — run eval on `checkpoints_v6_finetune/best_model.pth` in `fine_tuning` mode.
-3. **If v6-ft early stops without improvement** — consider resuming v6 pre-training further and re-fine-tuning.
-4. **Push all commits** to GitHub.
+### Immediate: Revert fixes 6–8 and retrain (Approach C)
 
-### v6-ft evaluation command (run after checkpoints_v6_finetune/best_model.pth is saved)
+1. **Revert `box_lastdim_expansion`** in `functions.py` to original paper logic (keep empty-tensor guard from fix 1)
+2. **Revert `loss_boxes`** in `optimization.py` from `5.0*L1 + 2.0*GIoU` to `L1 + GIoU`
+3. **Revert `HungarianMatcher`** in `functions.py` from `cost_bbox=5, cost_giou=2` to `cost_class=1, cost_bbox=1, cost_giou=1`
+4. **Fresh pre-training run (v7)** with reverted code — use same hyperparams as v6 (lr=3e-5, single GPU)
+5. **Fine-tune (v7-ft)** from best v7 checkpoint
+6. **Evaluate and compare** — this should break majority-class collapse
+
+### After baseline works: experiment with improvements
+- Try geometrically correct box expansion (fix 6) with adjusted LR
+- Try paper equation weights (5:2) with lower LR to compensate
+- Add class weighting to OD loss for fine-tuning
+- Implement Ldc warm-up/ramp (start Ldc weight at 0, ramp to 1)
+
+### Reference: v6-ft evaluation command
 ```bash
 source .venv/bin/activate
 CUDA_VISIBLE_DEVICES=0 python eval.py \
