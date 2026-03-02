@@ -68,6 +68,9 @@ def parse_args():
                         help='Generate and save visualization plots (requires --detailed)')
     parser.add_argument('--plot_dir', type=str, default='./plots',
                         help='Directory to save plot files (default: ./plots)')
+    parser.add_argument('--thresholds', type=str, default=None,
+                        help='Path to calibration_thresholds.json from calibrate.py. '
+                             'Applies per-class thresholds instead of argmax.')
     return parser.parse_args()
 
 
@@ -624,7 +627,7 @@ def _collect_artery_probs(od_out_i, num_classes, stenosis_gt, plaque_gt,
 
 @torch.no_grad()
 def evaluate(model, test_loader, device, num_classes, eval_sc=False,
-             tta=False, tta_k=5, detailed=False):
+             tta=False, tta_k=5, detailed=False, thresholds=None):
     """Run evaluation on test set.
 
     Args:
@@ -650,9 +653,10 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
     all_plaque_preds = []
     all_plaque_gts = []
 
-    # Softmax probability collection for AUC-ROC (only when detailed=True)
-    all_stenosis_probs = [] if detailed else None
-    all_plaque_probs = [] if detailed else None
+    # Softmax probability collection for AUC-ROC (when detailed=True or thresholds)
+    collect_probs = detailed or (thresholds is not None)
+    all_stenosis_probs = [] if collect_probs else None
+    all_plaque_probs = [] if collect_probs else None
 
     # Sampling point classification tracking
     sc_correct = 0
@@ -684,8 +688,8 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
                 all_stenosis_preds.append(stenosis_pred)
                 all_stenosis_gts.append(stenosis_gt)
 
-                # Collect softmax probabilities for AUC-ROC
-                if detailed:
+                # Collect softmax probabilities for AUC-ROC / thresholds
+                if collect_probs:
                     _collect_artery_probs(
                         od_out_i, num_classes, stenosis_gt, plaque_gt,
                         all_stenosis_probs, all_plaque_probs)
@@ -722,8 +726,8 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
                 all_stenosis_preds.append(stenosis_pred)
                 all_stenosis_gts.append(stenosis_gt)
 
-                # Collect softmax probabilities for AUC-ROC
-                if detailed:
+                # Collect softmax probabilities for AUC-ROC / thresholds
+                if collect_probs:
                     _collect_artery_probs(
                         od_out_i, num_classes, stenosis_gt, plaque_gt,
                         all_stenosis_probs, all_plaque_probs)
@@ -747,6 +751,17 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
             print(f"  Processed {batch_idx + 1}/{len(test_loader)} batches")
 
     print(f"Evaluation complete: {len(all_stenosis_gts)} samples\n")
+
+    # Apply per-class thresholds if provided (overrides argmax predictions)
+    if thresholds is not None and all_stenosis_probs is not None:
+        t = np.array(thresholds, dtype=np.float64)
+        prob_array = np.array(all_stenosis_probs)
+        scaled = prob_array / t[np.newaxis, :]
+        all_stenosis_preds = scaled.argmax(axis=1).tolist()
+        unique, counts = np.unique(all_stenosis_preds, return_counts=True)
+        dist = dict(zip(unique.tolist(), counts.tolist()))
+        print(f"[Thresholds applied] t={t.tolist()}")
+        print(f"  Prediction distribution: {dist}")
 
     # Compute stenosis metrics
     stenosis_metrics = compute_metrics(all_stenosis_gts, all_stenosis_preds, num_classes=3)
@@ -1533,6 +1548,16 @@ def main():
     device = get_device(args.device)
     print(f"Using device: {device}")
 
+    # Load thresholds if provided
+    thresholds = None
+    if args.thresholds:
+        with open(args.thresholds) as f:
+            thresh_data = json.load(f)
+        thresholds = thresh_data['stenosis_thresholds']
+        print(f"Loaded stenosis thresholds: {thresholds}")
+        print(f"  (val F1 baseline={thresh_data.get('val_macro_f1_baseline', '?'):.4f}, "
+              f"calibrated={thresh_data.get('val_macro_f1_calibrated', '?'):.4f})")
+
     # Determine num_classes based on pattern
     num_classes = 3 if args.pattern == 'pre_training' else 6
     print(f"Number of classes: {num_classes}")
@@ -1625,7 +1650,8 @@ def main():
 
         stenosis_metrics, plaque_metrics, sc_metrics, detailed_data = evaluate(
             model, test_loader, device, num_classes, eval_sc=args.eval_sc,
-            tta=args.tta, tta_k=args.tta_k, detailed=args.detailed
+            tta=args.tta, tta_k=args.tta_k, detailed=args.detailed,
+            thresholds=thresholds,
         )
 
     # Print results

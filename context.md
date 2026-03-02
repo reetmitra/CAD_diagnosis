@@ -40,7 +40,8 @@ source /home/reet/development/CAD_diagnosis/.venv/bin/activate
 | `augmentation.py` | `cubic_sequence_data` — loads NIfTI volumes + label txt files |
 | `framework.py` | `sc_net_framework` — wires model + loss + data together |
 | `train.py` | Full `Trainer` class with all CLI args |
-| `eval.py` | Evaluation with TTA, ensemble, detailed metrics, plots |
+| `eval.py` | Evaluation with TTA, ensemble, detailed metrics, plots, `--thresholds` |
+| `calibrate.py` | Per-class threshold calibration on validation set |
 | `config.py` | `DefaultConfig` with all hyperparameters |
 | `cross_validate.py` | Patient-level k-fold cross-validation |
 | `scripts/pretrain.sh` | Launch pre-training |
@@ -69,7 +70,10 @@ dataset/
 **Pre-training (3-class):** labels remapped via `((label-1) % 3) + 1` → plaque composition only (calcified/non-cal/mixed)
 **Fine-tuning (6-class):** all labels 1–6 used as-is
 
-Train set: 2,961 samples | Test set: 665 samples
+Train set: 2,961 samples (APNHC* patients) | Test set: 665 samples (AP-NUH* patients — completely separate)
+
+**Internal split of dataset/train:** 70% train (2073) / 15% val (444) / 15% test (444). Used for training and calibration.
+**Held-out test set:** `dataset/test/` — 665 files from different hospital/patient pool. Use `--data_root ./dataset/test` for proper evaluation.
 
 ---
 
@@ -118,13 +122,14 @@ Train set: 2,961 samples | Test set: 665 samples
 | v5-ft | 30 | **1e-5** | fine_tuning, 6-class, pretrained from v5 epoch 39 | **DONE** | Early stop epoch 30 (patience 20/20). Best val 4.50 (ep 10). Majority class only — backbone too weak. |
 | v6 | 57 | **3e-5** | pre_training, fresh start, single GPU (GPU 0) | **KILLED** | Best epoch 8 (val 3.22). Plateau 4.0–4.2 from ep29, patience 49/60. Killed — best checkpoint saved. |
 | v2-ft | 52 | **3e-6** | fine_tuning, pretrained from v2 epoch 139, single GPU (GPU 1) | **DONE** | Early stop ep52 (patience 30/30). Best val 5.05 (ep22). Majority class only — LR too low + bugs 6-8. |
-| v6-ft | 30+ | **5e-6** | fine_tuning, pretrained from v6 ep8 (val 3.22), single GPU (GPU 0) | **RUNNING (will early-stop ~ep39)** | Best ep9 val 4.14, patience 21+/30. Majority-class collapse — same as v5-ft. Root cause: fixes 6–8 changed loss landscape. |
+| v6-ft | 39 | **5e-6** | fine_tuning, pretrained from v6 ep8 (val 3.22), single GPU (GPU 0) | **DONE** | Early stopped ep39, best ep9 (val 4.1395). Calibrated: ACC 0.470, F1 0.417, Significant F1 0.621. |
 
 ### Current best checkpoints
 - `checkpoints_v2/checkpoint_epoch_139.pth` — best pre-training before bug fixes
 - `checkpoints/checkpoint_epoch_39.pth` — best pre-training with all bugs fixed (v5)
 - `checkpoints_v6/best_model.pth` — best pre-training with ALL bugs fixed (epoch 8, val 3.22) ← **BEST BACKBONE**
-- `checkpoints_v6_finetune/best_model.pth` — v6-ft fine-tuning best (epoch 9, val 4.14) ← **ACTIVE FINE-TUNING RUN — EVALUATE WHEN DONE**
+- `checkpoints_v6_finetune/best_model.pth` — v6-ft fine-tuning best (epoch 9, val 4.1395) ← **BEST FINE-TUNED MODEL**
+- `calibration_thresholds.json` — per-class thresholds [H=3.0, NS=1.0, Sig=0.346] for stenosis predictions
 
 ---
 
@@ -168,13 +173,38 @@ Train set: 2,961 samples | Test set: 665 samples
 | SC Points | 0.820 | — | — | Slightly higher than v5-ft (0.792) — v2 backbone stronger for SC. |
 > Both fine-tuning runs (v5-ft, v2-ft) stuck at majority class. Root cause: either backbone too weak (v5) or LR too low (v2-ft). v6-ft uses v6 epoch 8 checkpoint (val 3.22 — best pre-training yet) with LR 5e-6 (mid-point between too-low 3e-6 and too-high 1e-5).
 
-### v6-ft Epoch 9 (fine_tuning mode, 6-class — BREAKTHROUGH)
+### v6-ft Epoch 9 — Internal Split (15% of dataset/train, 445 samples)
 | Task | ACC | F1 | AUC (macro) | Notes |
 |------|-----|----|------------|-------|
-| Stenosis | 0.328 | 0.210 | 0.604 | **First non-majority-class prediction!** 18 Healthy correct. Significant AUC=0.707 shows strong internal discrimination. |
-| Plaque | 0.606 | 0.189 | 0.547 | Still majority class (Calcified) but AUC improving. |
+| Stenosis | 0.369 | 0.288 | 0.645 | Healthy AUC=0.778, **Significant AUC=0.748**. Zero Significant predictions — calibration problem. |
+| Plaque | 0.567 | 0.183 | 0.495 | Majority class collapse (all Calcified). AUC at chance level. |
 | SC Points | 0.806 | — | — | Stable. |
-> BREAKTHROUGH: v6 backbone (all 8 bugs fixed, val 3.22) + LR 5e-6 finally broke majority-class prediction. Confusion matrix shows 31 Healthy predictions (18 correct), 634 Non-significant, 0 Significant. Significant AUC=0.707 means model already discriminates internally — argmax should include Significant in next 10–20 epochs. Best val loss 4.14 (epoch 9) beats v5-ft best of 4.50.
+
+### v6-ft Epoch 9 — Held-Out Test Set (dataset/test/, 665 samples, AP-NUH patients)
+
+**Baseline (argmax):**
+| Task | ACC | F1 | AUC (macro) | Notes |
+|------|-----|----|------------|-------|
+| Stenosis | 0.328 | 0.210 | 0.604 | Significant AUC=0.707. Zero Significant predictions. |
+| Plaque | 0.606 | 0.189 | 0.547 | Majority class collapse (all Calcified). |
+| SC Points | 0.806 | — | — | Stable. |
+
+**Calibrated (thresholds: H=3.0, NS=1.0, Sig=0.346):**
+| Task | ACC | F1 | Spec | Notes |
+|------|-----|----|------|-------|
+| **Stenosis** | **0.435** | **0.393** | **0.716** | **Significant: P=0.500, R=0.553, F1=0.525.** 142/257 correct. |
+| Plaque | 0.606 | 0.189 | 0.855 | Unchanged — AUC near chance, calibration can't help. |
+
+**Calibration impact (held-out test set):**
+| Metric | Before | After | Delta |
+|--------|--------|-------|-------|
+| Stenosis ACC | 0.328 | 0.435 | +0.107 |
+| Stenosis Macro F1 | 0.210 | 0.393 | +0.183 |
+| Significant F1 | 0.000 | 0.525 | +0.525 |
+| Significant Recall | 0.000 | 0.553 | +0.553 |
+| Healthy F1 | 0.157 | 0.523 | +0.366 |
+
+> **Note:** Internal split results (445 samples from dataset/train) were inflated because train/val/test all came from APNHC patients. The held-out test set uses completely different AP-NUH patients — a harder, more realistic evaluation. Calibration still helps significantly (Macro F1 nearly doubled) but overall numbers are lower. The Non-significant class is sacrificed by calibration (F1 0.474 → 0.132) as thresholds push predictions toward Healthy and Significant.
 
 ### Paper Target (fine-tuned model)
 | Task | ACC |
@@ -338,31 +368,34 @@ The original paper code also silently skips loading layers with shape mismatches
 
 ## Pending Next Steps
 
-### Immediate: Revert fixes 6–8 and retrain (Approach C)
+### Completed: Threshold calibration (2026-03-02)
+- `calibrate.py` — grid searches per-class thresholds on validation set
+- `eval.py --thresholds calibration_thresholds.json` — applies thresholds at test time
+- Result: Significant F1 from 0.000 → 0.621 (no retraining)
 
-1. **Revert `box_lastdim_expansion`** in `functions.py` to original paper logic (keep empty-tensor guard from fix 1)
-2. **Revert `loss_boxes`** in `optimization.py` from `5.0*L1 + 2.0*GIoU` to `L1 + GIoU`
-3. **Revert `HungarianMatcher`** in `functions.py` from `cost_bbox=5, cost_giou=2` to `cost_class=1, cost_bbox=1, cost_giou=1`
-4. **Fresh pre-training run (v7)** with reverted code — use same hyperparams as v6 (lr=3e-5, single GPU)
-5. **Fine-tune (v7-ft)** from best v7 checkpoint
-6. **Evaluate and compare** — this should break majority-class collapse
+### Next: v7 fine-tuning with Ldc improvements
+1. **Delayed Ldc ramp** — hold dc_weight=0 for first 20 epochs, ramp 0→1 over epochs 20–40 (`--dc_warmup_hold 20 --dc_warmup_ramp 20`)
+2. **Confidence-gated Ldc pseudo-labels** — only use predictions with max(softmax) >= 0.7 as pseudo-labels (`--dc_confidence_threshold 0.7`)
+3. **Class-balanced batch sampling** — WeightedRandomSampler to ensure all stenosis classes present (`--balanced_sampling`)
+4. Fine-tune from v6 backbone: `checkpoints_v6/best_model.pth` (epoch 8, val 3.22)
 
-### After baseline works: experiment with improvements
-- Try geometrically correct box expansion (fix 6) with adjusted LR
-- Try paper equation weights (5:2) with lower LR to compensate
-- Add class weighting to OD loss for fine-tuning
-- Implement Ldc warm-up/ramp (start Ldc weight at 0, ramp to 1)
+### After v7-ft: investigate plaque branch
+- Plaque AUC=0.495 (chance level) — fundamental learning failure
+- Options: separate plaque supervision, architectural changes, data investigation
 
-### Reference: v6-ft evaluation command
+### Reference: evaluation with calibration
 ```bash
 source .venv/bin/activate
-CUDA_VISIBLE_DEVICES=0 python eval.py \
-  --checkpoint ./checkpoints_v6_finetune/best_model.pth \
-  --pattern fine_tuning \
-  --data_root ./dataset/test \
-  --batch_size 2 --eval_sc --detailed \
-  --plot --plot_dir ./plots_v6_finetune \
-  --save_results results_v6_finetune.json
+# Calibrate (run on validation split of dataset/train, save thresholds)
+python calibrate.py --checkpoint ./checkpoints_v6_finetune/best_model.pth \
+    --pattern fine_tuning --output calibration_thresholds.json --grid_steps 50
+
+# Evaluate on HELD-OUT test set (dataset/test/, 665 files)
+python eval.py --checkpoint ./checkpoints_v6_finetune/best_model.pth \
+    --pattern fine_tuning --data_root ./dataset/test \
+    --thresholds calibration_thresholds.json \
+    --detailed --plot --plot_dir ./plots_v6ft_heldout_cal \
+    --save_results results_v6ft_heldout_calibrated.json
 ```
 
 ---
