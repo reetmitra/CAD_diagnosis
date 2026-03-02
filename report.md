@@ -1243,9 +1243,115 @@ Overall: ACC=0.518, Macro F1=0.409, Macro AUC=0.656 (Calcified=0.713, Non-calc=0
 - `per_class_stenosis.png` — Per-class P/R/F1 bar chart (stenosis)
 - `per_class_plaque.png` — Per-class P/R/F1 bar chart (plaque)
 
-### Pending (Bugs 18–22)
+### Phase 10: Constrained Calibration + v8-ft Launch (2026-03-02)
 
-The five additional bugs identified through code-to-paper analysis have been fully documented with exact fix specifications but are not yet applied to the codebase. The most critical is **Bug 19** (label offset corruption in L_dc) which silently corrupts the dual-task contrastive loss — the paper's core novelty — by shifting all class labels and conflating distinct lesion types. Once these fixes are applied, the contrastive supervision will provide correct cross-task pseudo-labels for the first time.
+**Commit:** `484ca6b` Add constrained calibration + launch v8-ft training
+
+#### 10.1 Constrained Calibration — Non-significant Breakthrough
+
+**Motivation:** Standard calibration (Phase 9) fixed t₁=1.0 (Non-sig threshold), searching only t₀ (Healthy) and t₂ (Significant) in a 2D grid. As a result, the Non-sig class received 0 predictions on both val and test. The question was: does the model internally represent Non-sig at all, or is the AUC=0.436 fundamental?
+
+**Method:** Added `--constrain_nonsig_recall` flag to `calibrate.py`. When set (e.g., 0.10), a 3D grid search over all three thresholds (t₀, t₁, t₂) is run. The optimizer finds the configuration maximising macro-F1 subject to Non-sig recall ≥ the specified minimum.
+
+**Key finding:** With t₁=0.35 (Non-sig threshold lowered from 1.0), the model produces:
+
+**Validation set (444 samples, constrained calibration):**
+| Class | Precision | Recall | F1 | Support |
+|-------|-----------|--------|----|---------|
+| Healthy | 0.614 | 0.827 | 0.705 | 104 |
+| **Non-significant** | **0.503** | **0.620** | **0.555** | 150 |
+| Significant | 0.840 | 0.526 | 0.647 | 190 |
+
+Val Macro-F1: **0.636** (vs 0.468 standard calibration, +35%)
+
+**Held-out test set (665 samples, constrained calibration — eval with `--use_constrained`):**
+
+| Class | Precision | Recall | F1 | Support |
+|-------|-----------|--------|----|---------|
+| Healthy | 0.613 | 0.561 | 0.586 | 198 |
+| **Non-significant** | **0.412** | **0.581** | **0.482** | 210 |
+| Significant | 0.814 | 0.595 | 0.688 | 257 |
+
+Overall: **ACC=0.580, Macro F1=0.585, Macro AUC=0.713** (Healthy=0.838, Non-sig=0.436, Sig=0.863)
+
+**Interpretation:**
+- The v7-ft model **can** discriminate Non-significant stenosis — the 2D calibration was hiding this
+- On the training-distribution validation set, Non-sig F1=0.555 and Macro-F1=0.636
+- On the held-out test (different hospital distribution), Non-sig F1=0.482 — reduced by distribution shift, but still meaningful
+- AUC=0.436 for Non-sig is measured on raw model probabilities (argmax ordering) and does not reflect the calibrated performance. The 3D threshold search finds a region of probability space where Non-sig is genuinely discriminated.
+
+**Trade-off vs standard calibration:**
+
+| Metric | Standard cal | Constrained cal | Delta |
+|--------|-------------|----------------|-------|
+| Stenosis Macro F1 | 0.466 | **0.585** | +0.119 |
+| Non-sig Recall | 0.000 | **0.581** | +0.581 |
+| Significant Recall | **0.935** | 0.595 | -0.340 |
+| Stenosis ACC | 0.596 | 0.580 | -0.016 |
+
+→ Standard calibration preferred when Sig recall > 90% is clinically required (e.g., screening).
+→ Constrained calibration preferred for balanced 3-class evaluation matching the paper's setting.
+
+**Calibration files:**
+- `calibration_thresholds_v7.json` — standard: [H=0.600, NS=1.000, Sig=0.050]
+- `calibration_thresholds_v7_constrained.json` — constrained: [H=2.200, NS=0.350, Sig=0.250]
+
+**Updated Performance Summary (best results per model):**
+
+| Model | Backbone | Stenosis ACC | Steno F1 | Sig Rec | NS Rec | Plaque F1 | SC ACC |
+|-------|----------|-------------|----------|---------|--------|-----------|--------|
+| v6-ft (calibrated) | v6 ep8 | 0.435 | 0.393 | 0.553 | ~0.095 | 0.189 | 0.806 |
+| v7-ft (standard cal) | v6 ep8 | 0.596 | 0.466 | **0.935** | 0.000 | 0.463 | 0.814 |
+| **v7-ft (constrained cal)** | v6 ep8 | **0.580** | **0.585** | 0.595 | **0.581** | 0.463 | **0.814** |
+| Paper target | — | — | — | — | — | — | — |
+| **Paper (0.914 ACC)** | — | **0.914** | — | — | — | — | — |
+
+#### 10.2 v8-ft Training Launch (2026-03-02)
+
+v8-ft started from the v6 backbone with the following changes vs v7-ft:
+- `focal_gamma=3.0` (from 2.0) — harder focus on misclassified examples
+- `patience=25` (from 20) — more training budget
+- `epochs=120` (from 100)
+- 2-GPU DDP (faster than v7's single-GPU)
+- All v7 settings retained: DC hold=20, DC ramp=20, confidence gating=0.7, balanced sampling
+
+Log: `train_v8_finetune.log` | Checkpoints: `checkpoints_v8_finetune/`
+
+After training completes, evaluate using:
+```bash
+python calibrate.py --checkpoint ./checkpoints_v8_finetune/final_model.pth \
+    --pattern fine_tuning --output calibration_thresholds_v8_constrained.json \
+    --grid_steps 30 --constrain_nonsig_recall 0.10
+
+python eval.py --checkpoint ./checkpoints_v8_finetune/final_model.pth \
+    --pattern fine_tuning --data_root ./dataset/test \
+    --thresholds calibration_thresholds_v8_constrained.json --use_constrained \
+    --detailed --plot --plot_dir ./plots_v8ft_constrained \
+    --save_results results_v8ft_constrained.json
+```
+
+#### 10.3 Bug 19 Status Update
+
+**Bug 19 is already fixed.** The `_get_sampling_point_classification_targets()` method was rewritten as part of commit `e6bc34d` (v7 DC improvements). The original `argmax-1 + clamp(0)` label corruption was replaced with:
+1. Compute `pred_classes = argmax(softmax)`
+2. Filter no-object: `is_object = pred_classes < num_classes`
+3. Apply confidence gate: `is_confident = max_probs >= threshold`
+4. Pass `pred_classes[mask]` directly (0-indexed, no offset needed since `od2sc_targets` adds +1 internally)
+
+This means v7-ft and v8-ft both benefit from correct L_dc pseudo-labels.
+
+---
+
+### Pending (Bugs 18, 20–22)
+
+Bug 19 is fixed. The remaining four additional bugs are documented but not yet applied:
+
+| # | Fix | File(s) | Why It Matters |
+|---|-----|---------|----------------|
+| 18 | `sc2od_targets` empty tensor shape | `optimization.py` | Crashes on healthy-only arteries |
+| 20 | Loss component dict return | `optimization.py`, `train.py` | Cannot diagnose training issues without seeing L_od / L_sc / L_dc individually |
+| 21 | `detection_targets` empty tensor | `augmentation.py` | Same crash path as Bug 18, triggered during data loading |
+| 22 | Consistent forward() outputs | `architecture.py` | Prevents eval/inference code from breaking on mismatched return values |
 
 ---
 
