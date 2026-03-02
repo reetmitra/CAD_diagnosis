@@ -1047,19 +1047,55 @@ python eval.py --checkpoint ./checkpoints_v7_finetune/best_model.pth \
 
 ---
 
+### Phase 9: v7-ft Evaluation + Plaque Calibration (2026-03-02)
+
+**Commit:** TBD (this session)
+
+After v7-ft completed, two issues were identified:
+1. `calibrate.py` only searched stenosis thresholds; plaque probabilities were collected but never calibrated
+2. `eval.py` only applied stenosis thresholds from the JSON; plaque thresholds were not supported
+
+#### 9.1 Plaque Threshold Calibration
+
+Extended `calibrate.py` with `search_plaque_thresholds()`: a 3D grid search over all three plaque class thresholds (Calcified, Non-calcified, Mixed) using up to 25³=15,625 iterations. The key insight: raising t_Calcified (from 1.0 to 1.42) suppresses the dominant Calcified class, while lowering t_Non-calcified (0.78) and t_Mixed (1.19) encourages underrepresented classes.
+
+Extended `eval.py` to load and apply `plaque_thresholds` from the calibration JSON. The `collect_probs` flag now activates for either stenosis or plaque thresholds.
+
+| File | Change |
+|------|--------|
+| `calibrate.py` | +40 lines: `search_plaque_thresholds()` + plaque calibration block |
+| `eval.py` | +18 lines: `plaque_thresholds` param in `evaluate()`, load from JSON in `main()` |
+
+#### 9.2 Calibration Results (val split)
+
+| Task | Baseline Macro-F1 | Calibrated Macro-F1 | Delta |
+|------|------------------|--------------------|----|
+| Stenosis | 0.145 | 0.469 | +0.324 |
+| Plaque | 0.349 | **0.505** | +0.155 |
+
+Plaque thresholds: Calc=1.417, NonCalc=0.781, Mixed=1.188
+
+Per-class plaque on val set (calibrated):
+- Calcified: F1=0.708 (P=0.713, R=0.703)
+- Non-calcified: F1=0.466 (P=0.457, R=0.475)
+- Mixed: F1=0.340 (P=0.346, R=0.333)
+
+---
+
 ## Performance Summary
 
 ### Fine-Tuning Runs Comparison
 
 All fine-tuning evaluations use `fine_tuning` mode (6 classes) on 665 test files. Epoch reported is the best checkpoint epoch.
 
-| Run | Backbone | LR | Best ep | Stenosis ACC | Stenosis F1 | Stenosis AUC | Plaque ACC | SC ACC | Notes |
-|-----|----------|----|---------|-------------|------------|-------------|-----------|--------|-------|
-| v5-ft | v5 ep39 | 1e-5 | ep10 | 0.316 | 0.160 | 0.577 | 0.630 | 0.792 | Majority only |
-| v2-ft | v2 ep139 | 3e-6 | ep22 | 0.316 | — | 0.573 | 0.630 | — | Majority only |
-| v6-ft (argmax) | v6 ep8 | 5e-6 | ep9 | 0.328 | 0.210 | 0.604 | 0.606 | 0.806 | First class discrimination |
-| **v6-ft (calibrated)** | v6 ep8 | 5e-6 | ep9 | **0.435** | **0.393** | 0.604 | 0.606 | 0.806 | **Sig F1=0.525, R=0.553** |
-| v7-ft | v6 ep8 | 5e-6 | — | — | — | — | — | — | Running (Ldc improvements) |
+| Run | Backbone | LR | Best ep | Stenosis ACC | Stenosis F1 | Stenosis AUC | Plaque F1 | Plaque AUC | SC ACC | Notes |
+|-----|----------|----|---------|-------------|------------|-------------|----------|-----------|--------|-------|
+| v5-ft | v5 ep39 | 1e-5 | ep10 | 0.316 | 0.160 | 0.577 | 0.181 | — | 0.792 | Majority only |
+| v2-ft | v2 ep139 | 3e-6 | ep22 | 0.316 | — | 0.573 | — | — | — | Majority only |
+| v6-ft (argmax) | v6 ep8 | 5e-6 | ep9 | 0.328 | 0.210 | 0.604 | 0.181 | 0.547 | 0.806 | First class discrimination |
+| v6-ft (calibrated) | v6 ep8 | 5e-6 | ep9 | 0.435 | 0.393 | 0.604 | 0.181 | 0.547 | 0.806 | Sig F1=0.525, R=0.553 |
+| v7-ft (argmax) | v6 ep8 | 5e-6 | ep49 | 0.402 | 0.342 | 0.713 | 0.151 | 0.700 | 0.814 | Plaque still collapsed |
+| **v7-ft (calibrated)** | v6 ep8 | 5e-6 | ep49 | **0.565** | **0.445** | **0.713** | **0.463** | **0.700** | **0.814** | **Plaque breakthrough** |
 
 ### Before Fixes
 
@@ -1134,9 +1170,43 @@ Comparison of all fine-tuning runs. v6-ft evaluated on held-out test set (datase
 2. Threshold calibration rescued Significant class: F1 from 0.000 → 0.525 without retraining
 3. Gap to paper target (0.435 vs 0.914) addressed by v7-ft Ldc improvements (running)
 
-### After Phase 8 (v7-ft — Ldc improvements, running)
+### After Phase 8 / Phase 9 (v7-ft — Ldc improvements + plaque calibration)
 
-v7-ft launched with delayed Ldc ramp (hold=20, ramp=20), confidence-gated pseudo-labels (threshold=0.7), from the same v6 backbone. Expected to surpass v6-ft by allowing 20 epochs of clean L_od + L_sc learning before introducing cross-supervision. Results pending.
+v7-ft early stopped at epoch 49. Best val loss was achieved at epoch 19 (still in the DC=0 hold window), but the final checkpoint (epoch 49, full DC active) showed superior classification metrics and was used for evaluation.
+
+**Checkpoint comparison (val split):**
+
+| Checkpoint | Val Loss | Stenosis ACC | Stenosis AUC | Plaque AUC |
+|---|---|---|---|---|
+| best_model (ep19, DC=0) | **3.674** | 0.331 | 0.646 | 0.648 |
+| final_model (ep49, DC=1) | 3.918 | **0.402** | **0.713** | **0.700** |
+
+Val loss and classification quality diverge when DC activates — the final checkpoint is better despite higher val loss.
+
+**Held-out test evaluation with full calibration (stenosis + plaque thresholds):**
+
+| Task | Class | Metric | v6-ft cal | v7-ft cal | Delta |
+|---|---|---|---|---|---|
+| Stenosis | All | ACC | 0.435 | **0.565** | +13pp |
+| Stenosis | All | F1 | 0.393 | **0.445** | +5.2pp |
+| Stenosis | All | AUC | 0.604 | **0.713** | +10.9pp |
+| Stenosis | Healthy | F1 | — | **0.649** | — |
+| Stenosis | Non-sig | F1 | — | 0.000 | AUC=0.436 (hard) |
+| Stenosis | Significant | F1 | 0.525 | **0.686** | +16.1pp |
+| Stenosis | Significant | Recall | 0.553 | **0.907** | +35.4pp |
+| Plaque | All | ACC | 0.606 | **0.567** | — |
+| Plaque | All | F1 | 0.181 | **0.463** | +28.2pp |
+| Plaque | All | AUC | 0.547 | **0.700** | +15.3pp |
+| Plaque | Calcified | F1 | 0.759 | **0.694** | -6.5pp (more balanced) |
+| Plaque | Non-calc | F1 | 0.000 | **0.412** | BREAKTHROUGH |
+| Plaque | Mixed | F1 | 0.000 | **0.282** | BREAKTHROUGH |
+| SC Points | — | ACC | 0.806 | **0.814** | +0.8pp |
+
+**Key outcomes:**
+1. Plaque branch is now genuinely multi-class: both Non-calcified (F1=0.412) and Mixed (F1=0.282) are predicted for the first time
+2. Significant stenosis recall = 0.907 — clinically critical; the model catches >90% of significant stenoses
+3. Non-significant stenosis remains at 0% (AUC=0.436 ≈ random) — a genuine limitation of the current model/data
+4. Plaque calibration evaluated over 467 samples (vs 344 in uncalibrated eval) — threshold-based predictions resolve "no detection" cases for GT-positive arteries
 
 ### Pending (Bugs 18–22)
 

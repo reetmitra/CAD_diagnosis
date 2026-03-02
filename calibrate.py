@@ -93,6 +93,34 @@ def search_thresholds(probs, gts, grid_steps=50):
     return best_t, best_f1
 
 
+def search_plaque_thresholds(probs, gts, grid_steps=50):
+    """3D grid search over all three plaque class thresholds.
+
+    Raises t0 (Calcified) to suppress the dominant class.
+    Lowers t1 (Non-calcified) and t2 (Mixed) to encourage underrepresented classes.
+    Uses a reduced grid (min 25 steps) to keep 3D search tractable.
+    """
+    best_f1 = -1.0
+    best_t = [1.0, 1.0, 1.0]
+
+    steps = min(grid_steps, 25)
+    t0_grid = np.linspace(0.5, 6.0, steps)   # Calcified: suppress
+    t1_grid = np.linspace(0.05, 2.0, steps)  # Non-calcified: encourage
+    t2_grid = np.linspace(0.05, 2.0, steps)  # Mixed: encourage
+
+    for t0 in t0_grid:
+        for t1 in t1_grid:
+            for t2 in t2_grid:
+                t = [t0, t1, t2]
+                preds = threshold_predict(probs, t)
+                f1 = macro_f1(gts, preds)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_t = [float(t0), float(t1), float(t2)]
+
+    return best_t, best_f1
+
+
 @torch.no_grad()
 def collect_val_probs(model, val_loader, device, num_classes):
     """Run inference on the validation set, collect artery-level probs + GTs."""
@@ -234,6 +262,36 @@ def main():
           f"Rec={cal_metrics['recall']:.3f}  F1={cal_metrics['f1']:.3f}  "
           f"Spec={cal_metrics['spec']:.3f}")
 
+    # Plaque threshold search
+    plaque_best_t = None
+    if plaque_probs is not None and len(plaque_gts) > 0:
+        print(f"\n{'='*60}")
+        print(f"PLAQUE THRESHOLD SEARCH (grid_steps={args.grid_steps})")
+        print(f"{'='*60}")
+
+        plaque_baseline_preds = plaque_probs.argmax(axis=1)
+        plaque_baseline_f1 = macro_f1(plaque_gts, plaque_baseline_preds)
+        u, c = np.unique(plaque_baseline_preds, return_counts=True)
+        print(f"  Baseline Macro-F1: {plaque_baseline_f1:.4f}  "
+              f"dist={dict(zip(u.tolist(), c.tolist()))}")
+
+        plaque_best_t, plaque_best_f1 = search_plaque_thresholds(
+            plaque_probs, plaque_gts, args.grid_steps)
+        plaque_cal_preds = threshold_predict(plaque_probs, plaque_best_t)
+        u, c = np.unique(plaque_cal_preds, return_counts=True)
+        print(f"  Best thresholds: Calc={plaque_best_t[0]:.3f}  "
+              f"NonCalc={plaque_best_t[1]:.3f}  Mixed={plaque_best_t[2]:.3f}")
+        print(f"  Calibrated Macro-F1: {plaque_best_f1:.4f}  "
+              f"(baseline: {plaque_baseline_f1:.4f}, "
+              f"delta: {plaque_best_f1 - plaque_baseline_f1:+.4f})")
+        print(f"  Prediction distribution: {dict(zip(u.tolist(), c.tolist()))}")
+
+        plaque_cal_pc = compute_per_class_metrics(
+            plaque_gts.tolist(), plaque_cal_preds.tolist(), PLAQUE_CLASSES)
+        for m in plaque_cal_pc:
+            print(f"    {m['class']:<20} P={m['precision']:.3f}  R={m['recall']:.3f}  "
+                  f"F1={m['f1']:.3f}  N={m['support']}")
+
     # Save
     output = {
         'stenosis_thresholds': best_t,
@@ -251,6 +309,11 @@ def main():
         'pattern': args.pattern,
         'grid_steps': args.grid_steps,
     }
+    if plaque_best_t is not None:
+        output['plaque_thresholds'] = plaque_best_t
+        output['plaque_class_names'] = PLAQUE_CLASSES
+        output['val_plaque_macro_f1_baseline'] = float(plaque_baseline_f1)
+        output['val_plaque_macro_f1_calibrated'] = float(plaque_best_f1)
     with open(args.output, 'w') as f:
         json.dump(output, f, indent=2)
     print(f"\nThresholds saved to: {args.output}")

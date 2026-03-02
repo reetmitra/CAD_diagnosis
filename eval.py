@@ -627,7 +627,8 @@ def _collect_artery_probs(od_out_i, num_classes, stenosis_gt, plaque_gt,
 
 @torch.no_grad()
 def evaluate(model, test_loader, device, num_classes, eval_sc=False,
-             tta=False, tta_k=5, detailed=False, thresholds=None):
+             tta=False, tta_k=5, detailed=False, thresholds=None,
+             plaque_thresholds=None):
     """Run evaluation on test set.
 
     Args:
@@ -639,6 +640,8 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
         tta: if True, enable test-time augmentation
         tta_k: number of augmented versions for TTA (default 5)
         detailed: if True, also collect softmax probabilities for AUC-ROC
+        thresholds: list of 3 stenosis per-class thresholds (or None for argmax)
+        plaque_thresholds: list of 3 plaque per-class thresholds (or None for argmax)
 
     Returns:
         stenosis_metrics: dict of stenosis classification metrics
@@ -654,7 +657,7 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
     all_plaque_gts = []
 
     # Softmax probability collection for AUC-ROC (when detailed=True or thresholds)
-    collect_probs = detailed or (thresholds is not None)
+    collect_probs = detailed or (thresholds is not None) or (plaque_thresholds is not None)
     all_stenosis_probs = [] if collect_probs else None
     all_plaque_probs = [] if collect_probs else None
 
@@ -762,6 +765,18 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
         dist = dict(zip(unique.tolist(), counts.tolist()))
         print(f"[Thresholds applied] t={t.tolist()}")
         print(f"  Prediction distribution: {dist}")
+
+    # Apply plaque thresholds if provided (overrides argmax plaque predictions)
+    if (plaque_thresholds is not None and all_plaque_probs is not None
+            and len(all_plaque_probs) > 0):
+        pt = np.array(plaque_thresholds, dtype=np.float64)
+        plaque_prob_array = np.array(all_plaque_probs)
+        scaled = plaque_prob_array / pt[np.newaxis, :]
+        all_plaque_preds = scaled.argmax(axis=1).tolist()
+        unique, counts = np.unique(all_plaque_preds, return_counts=True)
+        dist = dict(zip(unique.tolist(), counts.tolist()))
+        print(f"[Plaque thresholds applied] t={pt.tolist()}")
+        print(f"  Plaque prediction distribution: {dist}")
 
     # Compute stenosis metrics
     stenosis_metrics = compute_metrics(all_stenosis_gts, all_stenosis_preds, num_classes=3)
@@ -1550,6 +1565,7 @@ def main():
 
     # Load thresholds if provided
     thresholds = None
+    plaque_thresholds = None
     if args.thresholds:
         with open(args.thresholds) as f:
             thresh_data = json.load(f)
@@ -1557,6 +1573,11 @@ def main():
         print(f"Loaded stenosis thresholds: {thresholds}")
         print(f"  (val F1 baseline={thresh_data.get('val_macro_f1_baseline', '?'):.4f}, "
               f"calibrated={thresh_data.get('val_macro_f1_calibrated', '?'):.4f})")
+        if 'plaque_thresholds' in thresh_data:
+            plaque_thresholds = thresh_data['plaque_thresholds']
+            print(f"Loaded plaque thresholds: {plaque_thresholds}")
+            print(f"  (val plaque F1 baseline={thresh_data.get('val_plaque_macro_f1_baseline', '?'):.4f}, "
+                  f"calibrated={thresh_data.get('val_plaque_macro_f1_calibrated', '?'):.4f})")
 
     # Determine num_classes based on pattern
     num_classes = 3 if args.pattern == 'pre_training' else 6
@@ -1651,7 +1672,7 @@ def main():
         stenosis_metrics, plaque_metrics, sc_metrics, detailed_data = evaluate(
             model, test_loader, device, num_classes, eval_sc=args.eval_sc,
             tta=args.tta, tta_k=args.tta_k, detailed=args.detailed,
-            thresholds=thresholds,
+            thresholds=thresholds, plaque_thresholds=plaque_thresholds,
         )
 
     # Print results
