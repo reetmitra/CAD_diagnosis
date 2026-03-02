@@ -37,10 +37,12 @@ data/
 logs/
 *.log
 
-# Evaluation results and tensorboard runs
+# Evaluation results, tensorboard runs, and plots
 results*.json
 runs*/
 runs/
+plots*/
+plots/
 
 # OS
 .DS_Store
