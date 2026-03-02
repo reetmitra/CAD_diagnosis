@@ -71,6 +71,9 @@ def parse_args():
     parser.add_argument('--thresholds', type=str, default=None,
                         help='Path to calibration_thresholds.json from calibrate.py. '
                              'Applies per-class thresholds instead of argmax.')
+    parser.add_argument('--use_constrained', action='store_true',
+                        help='When --thresholds is provided, use constrained_stenosis_thresholds '
+                             'instead of stenosis_thresholds (for Non-sig recall enforcement).')
     return parser.parse_args()
 
 
@@ -1595,10 +1598,17 @@ def main():
     if args.thresholds:
         with open(args.thresholds) as f:
             thresh_data = json.load(f)
-        thresholds = thresh_data['stenosis_thresholds']
-        print(f"Loaded stenosis thresholds: {thresholds}")
-        print(f"  (val F1 baseline={thresh_data.get('val_macro_f1_baseline', '?'):.4f}, "
-              f"calibrated={thresh_data.get('val_macro_f1_calibrated', '?'):.4f})")
+        if args.use_constrained and 'constrained_stenosis_thresholds' in thresh_data:
+            thresholds = thresh_data['constrained_stenosis_thresholds']
+            print(f"Loaded CONSTRAINED stenosis thresholds: {thresholds}")
+            min_rec = thresh_data.get('constrain_nonsig_recall', '?')
+            print(f"  (min Non-sig recall constraint: {min_rec}, "
+                  f"val F1={thresh_data.get('constrained_val_macro_f1', '?'):.4f})")
+        else:
+            thresholds = thresh_data['stenosis_thresholds']
+            print(f"Loaded stenosis thresholds: {thresholds}")
+            print(f"  (val F1 baseline={thresh_data.get('val_macro_f1_baseline', '?'):.4f}, "
+                  f"calibrated={thresh_data.get('val_macro_f1_calibrated', '?'):.4f})")
         if 'plaque_thresholds' in thresh_data:
             plaque_thresholds = thresh_data['plaque_thresholds']
             print(f"Loaded plaque thresholds: {plaque_thresholds}")

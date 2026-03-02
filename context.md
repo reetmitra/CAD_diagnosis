@@ -123,13 +123,17 @@ Train set: 2,961 samples (APNHC* patients) | Test set: 665 samples (AP-NUH* pati
 | v6 | 57 | **3e-5** | pre_training, fresh start, single GPU (GPU 0) | **KILLED** | Best epoch 8 (val 3.22). Plateau 4.0–4.2 from ep29, patience 49/60. Killed — best checkpoint saved. |
 | v2-ft | 52 | **3e-6** | fine_tuning, pretrained from v2 epoch 139, single GPU (GPU 1) | **DONE** | Early stop ep52 (patience 30/30). Best val 5.05 (ep22). Majority class only — LR too low + bugs 6-8. |
 | v6-ft | 39 | **5e-6** | fine_tuning, pretrained from v6 ep8 (val 3.22), single GPU (GPU 0) | **DONE** | Early stopped ep39, best ep9 (val 4.1395). Calibrated: ACC 0.470, F1 0.417, Significant F1 0.621. |
+| v7-ft | 49 | **5e-6** | fine_tuning, from v6 backbone, DC hold=20/ramp=20, confidence=0.7, balanced_sampling, focal_gamma=2.0 | **DONE** | Early stopped ep49 (patience). Best val ep19 (DC=0 hold). final_model.pth (ep49) better for classification. |
+| v8-ft | – | **5e-6** | fine_tuning, from v6 backbone, all v7 settings + focal_gamma=3.0, patience=25, epochs=120, 2-GPU DDP | **RUNNING** | Launched 2026-03-02. Expect completion ~3-5 days. |
 
 ### Current best checkpoints
 - `checkpoints_v2/checkpoint_epoch_139.pth` — best pre-training before bug fixes
 - `checkpoints/checkpoint_epoch_39.pth` — best pre-training with all bugs fixed (v5)
 - `checkpoints_v6/best_model.pth` — best pre-training with ALL bugs fixed (epoch 8, val 3.22) ← **BEST BACKBONE**
-- `checkpoints_v6_finetune/best_model.pth` — v6-ft fine-tuning best (epoch 9, val 4.1395) ← **BEST FINE-TUNED MODEL**
-- `calibration_thresholds.json` — per-class thresholds [H=3.0, NS=1.0, Sig=0.346] for stenosis predictions
+- `checkpoints_v6_finetune/best_model.pth` — v6-ft fine-tuning best (epoch 9, val 4.1395)
+- `checkpoints_v7_finetune/final_model.pth` — v7-ft epoch 49 ← **BEST FINE-TUNED MODEL**
+- `calibration_thresholds_v7.json` — standard calibration (Non-sig=0 predictions, Sig Recall=93.5%)
+- `calibration_thresholds_v7_constrained.json` — **constrained calibration** (min Non-sig recall=10%) ← **USE THIS**
 
 ---
 
@@ -205,6 +209,32 @@ Train set: 2,961 samples (APNHC* patients) | Test set: 665 samples (AP-NUH* pati
 | Healthy F1 | 0.157 | 0.523 | +0.366 |
 
 > **Note:** Internal split results (445 samples from dataset/train) were inflated because train/val/test all came from APNHC patients. The held-out test set uses completely different AP-NUH patients — a harder, more realistic evaluation. Calibration still helps significantly (Macro F1 nearly doubled) but overall numbers are lower. The Non-significant class is sacrificed by calibration (F1 0.474 → 0.132) as thresholds push predictions toward Healthy and Significant.
+
+### v7-ft Epoch 49 — Held-Out Test Set (standard calibration)
+| Task | ACC | F1 | AUC | Notes |
+|------|-----|----|-----|-------|
+| Stenosis | 0.596 | 0.466 | 0.713 | Sig Recall=0.935. Non-sig=0 predictions. |
+| Plaque | 0.567 | 0.463 | 0.700 | NonCalc F1=0.412, Mixed F1=0.282. Breakthrough vs v6-ft. |
+| SC Points | 0.814 | — | — | Stable. |
+
+### v7-ft Epoch 49 — Held-Out Test Set (constrained calibration — **BEST**)
+- Calibration file: `calibration_thresholds_v7_constrained.json`
+- Val Macro-F1=0.636 (from 0.468 standard); constraint: Non-sig recall >= 10%
+
+| Task | ACC | F1 | AUC | Notes |
+|------|-----|----|-----|-------|
+| **Stenosis** | **0.580** | **0.585** | **0.713** | Balanced across all 3 classes |
+| Plaque | 0.567 | 0.463 | 0.700 | Unchanged (same plaque thresholds) |
+| SC Points | 0.814 | — | — | Stable. |
+
+Per-class (stenosis):
+| Class | Precision | Recall | F1 | Support |
+|-------|-----------|--------|----|---------|
+| Healthy | 0.613 | 0.561 | 0.586 | 198 |
+| **Non-significant** | **0.412** | **0.581** | **0.482** | 210 |
+| Significant | 0.814 | 0.595 | 0.688 | 257 |
+
+Key insight: **The model CAN discriminate Non-sig** — the 2D grid search (t1=1.0 fixed) was missing it. 3D constrained search with t1=0.35 unlocks Non-sig recall of 58%.
 
 ### Paper Target (fine-tuned model)
 | Task | ACC |
@@ -368,34 +398,39 @@ The original paper code also silently skips loading layers with shape mismatches
 
 ## Pending Next Steps
 
-### Completed: Threshold calibration (2026-03-02)
-- `calibrate.py` — grid searches per-class thresholds on validation set
-- `eval.py --thresholds calibration_thresholds.json` — applies thresholds at test time
-- Result: Significant F1 from 0.000 → 0.621 (no retraining)
+### Completed: Constrained calibration (2026-03-02)
+- `calibrate.py --constrain_nonsig_recall 0.10` — 3D grid search with min Non-sig recall constraint
+- **Result: Macro-F1 0.466 → 0.585 (+25%), Non-sig Recall 0% → 58.1%** (major breakthrough)
+- Key: 2D search fixed t1=1.0, missing Non-sig sweet spot. 3D search finds t1=0.35.
+- Standard calibration still useful when Sig recall > 90% is clinically required.
 
-### Next: v7 fine-tuning with Ldc improvements
-1. **Delayed Ldc ramp** — hold dc_weight=0 for first 20 epochs, ramp 0→1 over epochs 20–40 (`--dc_warmup_hold 20 --dc_warmup_ramp 20`)
-2. **Confidence-gated Ldc pseudo-labels** — only use predictions with max(softmax) >= 0.7 as pseudo-labels (`--dc_confidence_threshold 0.7`)
-3. **Class-balanced batch sampling** — WeightedRandomSampler to ensure all stenosis classes present (`--balanced_sampling`)
-4. Fine-tune from v6 backbone: `checkpoints_v6/best_model.pth` (epoch 8, val 3.22)
+### Running: v8-ft (2026-03-02)
+- Identical to v7-ft but focal_gamma=3.0 (from 2.0), patience=25, epochs=120, 2-GPU DDP
+- Log: `train_v8_finetune.log`; checkpoints: `checkpoints_v8_finetune/`
+- After training: calibrate with `--constrain_nonsig_recall 0.10` on val; eval on held-out test
 
-### After v7-ft: investigate plaque branch
-- Plaque AUC=0.495 (chance level) — fundamental learning failure
-- Options: separate plaque supervision, architectural changes, data investigation
+### Bug 19 status: ALREADY FIXED
+- Bug 19 (label offset in `_get_sampling_point_classification_targets`) was fixed in commit `e6bc34d`
+  as part of v7 DC improvements — confidence gating + no-object filtering replaced the broken argmax-1 logic.
 
-### Reference: evaluation with calibration
+### Reference: evaluation with constrained calibration
 ```bash
 source .venv/bin/activate
-# Calibrate (run on validation split of dataset/train, save thresholds)
-python calibrate.py --checkpoint ./checkpoints_v6_finetune/best_model.pth \
-    --pattern fine_tuning --output calibration_thresholds.json --grid_steps 50
 
-# Evaluate on HELD-OUT test set (dataset/test/, 665 files)
-python eval.py --checkpoint ./checkpoints_v6_finetune/best_model.pth \
+# 1. Calibrate on val split (3D constrained search, ~10 min)
+python calibrate.py --checkpoint ./checkpoints_v8_finetune/final_model.pth \
+    --pattern fine_tuning \
+    --output calibration_thresholds_v8_constrained.json \
+    --grid_steps 30 \
+    --constrain_nonsig_recall 0.10
+
+# 2. Evaluate on held-out test with constrained thresholds
+python eval.py --checkpoint ./checkpoints_v8_finetune/final_model.pth \
     --pattern fine_tuning --data_root ./dataset/test \
-    --thresholds calibration_thresholds.json \
-    --detailed --plot --plot_dir ./plots_v6ft_heldout_cal \
-    --save_results results_v6ft_heldout_calibrated.json
+    --thresholds calibration_thresholds_v8_constrained.json \
+    --use_constrained \
+    --detailed --plot --plot_dir ./plots_v8ft_constrained \
+    --save_results results_v8ft_constrained.json
 ```
 
 ---

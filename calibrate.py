@@ -56,6 +56,9 @@ def parse_args():
                         help='Output JSON path (default: calibration_thresholds.json)')
     parser.add_argument('--grid_steps', type=int, default=50,
                         help='Grid points per threshold dimension (default: 50)')
+    parser.add_argument('--constrain_nonsig_recall', type=float, default=0.0,
+                        help='If > 0, run 3D constrained search requiring Non-sig recall '
+                             '>= this value (e.g. 0.10). Accepts a trade-off in overall F1.')
     return parser.parse_args()
 
 
@@ -93,6 +96,60 @@ def search_thresholds(probs, gts, grid_steps=50):
                 best_t = [float(t0), 1.0, float(t2)]
 
     return best_t, best_f1
+
+
+def search_thresholds_constrained(probs, gts, grid_steps=30,
+                                  min_nonsig_recall=0.10):
+    """3D grid search over all 3 stenosis thresholds with Non-sig recall constraint.
+
+    Maximises macro-F1 subject to Non-sig recall >= min_nonsig_recall.
+    Also searches t1 (Non-sig threshold) — lower t1 forces more Non-sig predictions.
+    Falls back to the best unconstrained result if no configuration satisfies the
+    recall constraint.
+    """
+    from sklearn.metrics import recall_score
+
+    best_f1 = -1.0
+    best_t = [1.0, 1.0, 1.0]
+    best_f1_unconstrained = -1.0
+    best_t_unconstrained = [1.0, 1.0, 1.0]
+
+    # Narrower t1 range: lowering t1 encourages Non-sig predictions
+    t0_grid = np.linspace(0.1, 3.0, grid_steps)
+    t1_grid = np.linspace(0.05, 1.5, grid_steps)  # Non-sig: search full range
+    t2_grid = np.linspace(0.05, 1.5, grid_steps)
+
+    gts_arr = np.array(gts)
+    nonsig_mask = gts_arr == 1  # Non-sig is class 1
+
+    for t0 in t0_grid:
+        for t1 in t1_grid:
+            for t2 in t2_grid:
+                t = [t0, t1, t2]
+                preds = threshold_predict(probs, t)
+                f1 = macro_f1(gts, preds)
+
+                # Track best unconstrained result too
+                if f1 > best_f1_unconstrained:
+                    best_f1_unconstrained = f1
+                    best_t_unconstrained = [float(t0), float(t1), float(t2)]
+
+                # Compute Non-sig recall
+                preds_arr = np.array(preds)
+                if nonsig_mask.sum() > 0:
+                    nonsig_recall = (preds_arr[nonsig_mask] == 1).mean()
+                else:
+                    nonsig_recall = 0.0
+
+                if nonsig_recall >= min_nonsig_recall and f1 > best_f1:
+                    best_f1 = f1
+                    best_t = [float(t0), float(t1), float(t2)]
+
+    if best_f1 < 0:
+        print(f"  WARNING: No config satisfied Non-sig recall >= {min_nonsig_recall:.2f}. "
+              f"Returning unconstrained best.")
+        return best_t_unconstrained, best_f1_unconstrained, False
+    return best_t, best_f1, True
 
 
 def search_plaque_thresholds(probs, gts, grid_steps=50):
@@ -313,6 +370,43 @@ def main():
           f"Rec={cal_metrics['recall']:.3f}  F1={cal_metrics['f1']:.3f}  "
           f"Spec={cal_metrics['spec']:.3f}")
 
+    # Constrained calibration (optional)
+    constrained_best_t = None
+    constrained_best_f1 = None
+    if args.constrain_nonsig_recall > 0:
+        print(f"\n{'='*60}")
+        print(f"CONSTRAINED THRESHOLD SEARCH "
+              f"(min Non-sig recall >= {args.constrain_nonsig_recall:.2f}, "
+              f"grid_steps={args.grid_steps})")
+        print(f"{'='*60}")
+        steps = min(args.grid_steps, 30)
+        constrained_best_t, constrained_best_f1, satisfied = \
+            search_thresholds_constrained(
+                sten_probs, sten_gts, grid_steps=steps,
+                min_nonsig_recall=args.constrain_nonsig_recall)
+        con_preds = threshold_predict(sten_probs, constrained_best_t)
+        u_con, c_con = np.unique(con_preds, return_counts=True)
+        print(f"  Constraint satisfied: {satisfied}")
+        print(f"  Best thresholds: Healthy={constrained_best_t[0]:.3f}  "
+              f"Non-sig={constrained_best_t[1]:.3f}  "
+              f"Significant={constrained_best_t[2]:.3f}")
+        print(f"  Constrained Macro-F1: {constrained_best_f1:.4f}  "
+              f"(standard: {best_f1:.4f}, delta: "
+              f"{constrained_best_f1 - best_f1:+.4f})")
+        print(f"  Prediction distribution: "
+              f"{dict(zip(u_con.tolist(), c_con.tolist()))}")
+        con_pc = compute_per_class_metrics(
+            sten_gts.tolist(), con_preds.tolist(), STENOSIS_CLASSES)
+        for m in con_pc:
+            print(f"    {m['class']:<20} P={m['precision']:.3f}  R={m['recall']:.3f}  "
+                  f"F1={m['f1']:.3f}  N={m['support']}")
+        con_metrics = compute_metrics(sten_gts.tolist(), con_preds.tolist(),
+                                      num_classes=3)
+        print(f"\n  Constrained overall metrics:")
+        print(f"    ACC={con_metrics['acc']:.3f}  Prec={con_metrics['prec']:.3f}  "
+              f"Rec={con_metrics['recall']:.3f}  F1={con_metrics['f1']:.3f}  "
+              f"Spec={con_metrics['spec']:.3f}")
+
     # Plaque threshold search
     plaque_best_t = None
     if plaque_probs is not None and len(plaque_gts) > 0:
@@ -365,6 +459,10 @@ def main():
         output['plaque_class_names'] = PLAQUE_CLASSES
         output['val_plaque_macro_f1_baseline'] = float(plaque_baseline_f1)
         output['val_plaque_macro_f1_calibrated'] = float(plaque_best_f1)
+    if constrained_best_t is not None:
+        output['constrained_stenosis_thresholds'] = constrained_best_t
+        output['constrained_val_macro_f1'] = float(constrained_best_f1)
+        output['constrain_nonsig_recall'] = args.constrain_nonsig_recall
     with open(args.output, 'w') as f:
         json.dump(output, f, indent=2)
     print(f"\nThresholds saved to: {args.output}")
