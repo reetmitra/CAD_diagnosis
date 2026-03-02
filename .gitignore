@@ -44,6 +44,11 @@ runs/
 plots*/
 plots/
 
+# Generated files
+create_presentation.py
+*.pptx
+calibration_thresholds.json
+
 # OS
 .DS_Store
 Thumbs.db
