@@ -863,6 +863,70 @@ Evaluated `checkpoints_v6_finetune/best_model.pth` (epoch 9) on 665 test files i
 3. **Better than v5-ft at the same relative stage:** v5-ft epoch 10 had stenosis AUC 0.577 and zero non-majority predictions. v6-ft epoch 9 has AUC 0.604 overall and 0.707 for Significant, with active non-majority predictions.
 4. **Still running:** Patience 8/30 at epoch ~18, approximately 22 epochs remaining before early stopping. Significant class argmax predictions expected to emerge in the next 10–20 epochs as focal loss continues upweighting hard minority-class examples.
 
+#### 7.5 v6-ft Final Evaluation — Training Complete (2026-03-02)
+
+Training completed via early stopping at epoch 39. The best checkpoint at epoch 9 (val loss 4.1395) was used for the final `--detailed --plot` evaluation on 445 test samples in `fine_tuning` mode.
+
+**Training summary:**
+
+| Parameter | Value |
+|-----------|-------|
+| Early stopped at | Epoch 39 |
+| Best checkpoint | Epoch 9 (val loss 4.1395) |
+| Patience exhausted | 30 epochs with no improvement beyond epoch 9 |
+
+The model peaked at epoch 9 during the LR warmup phase and never improved further, indicating the post-warmup cosine decay dropped the LR into a regime where gradients were insufficient to escape the current local optimum.
+
+**Stenosis Degree Classification:**
+
+| Metric | Value |
+|--------|-------|
+| Accuracy | 0.369 |
+| Precision (macro) | 0.294 |
+| Recall (macro) | 0.395 |
+| F1 (macro) | 0.288 |
+| Specificity (macro) | 0.685 |
+
+Per-class breakdown:
+
+| Class | Precision | Recall | F1 | Support |
+|-------|-----------|--------|----|---------|
+| Healthy | 0.532 | 0.272 | 0.360 | 92 |
+| Non-significant | 0.349 | 0.914 | 0.505 | 152 |
+| Significant | 0.000 | 0.000 | 0.000 | 201 |
+
+Confusion matrix:
+
+| True \ Predicted | Healthy | Non-sig | Significant |
+|-----------------|---------|---------|-------------|
+| Healthy | 25 | 67 | 0 |
+| Non-significant | 13 | 139 | 0 |
+| Significant | 9 | 192 | 0 |
+
+AUC (one-vs-rest): Healthy=0.778, Non-significant=0.408, **Significant=0.748**, Macro=**0.645**
+
+**Plaque Composition Classification:**
+
+| Metric | Value |
+|--------|-------|
+| Accuracy | 0.567 |
+| Precision (macro) | 0.151 |
+| Recall (macro) | 0.233 |
+| F1 (macro) | 0.183 |
+| Specificity (macro) | 0.855 |
+
+All plaque predictions collapsed to Calcified majority class. AUC: Calcified=0.496, Non-calcified=0.494, Mixed=0.495, Macro=**0.495** (chance level).
+
+**Key findings:**
+
+1. **Model peaked at epoch 9, no subsequent improvement.** The 30-epoch patience window expired with zero improvement. Post-warmup cosine decay dropped LR too fast relative to the available gradient signal.
+
+2. **Stenosis: calibration problem, not learning failure.** AUC=0.748 for Significant is strong — the model's softmax probabilities rank true Significant cases with meaningful discriminative power. However, 398/445 (89.4%) of all argmax predictions land on Non-significant and zero predictions are made for Significant. The decision threshold is misaligned. Post-hoc threshold calibration (temperature scaling or per-class threshold tuning on a held-out calibration set) would recover Significant predictions without retraining.
+
+3. **Plaque: complete majority-class collapse, AUC at chance level.** Unlike stenosis where a strong AUC signal exists, plaque Macro AUC of 0.495 is indistinguishable from random. The plaque branch has not learned any discriminative representation. This cannot be fixed by threshold calibration — requires separate investigation into data quality, class distribution, and whether the branch needs independent supervision.
+
+4. **Next step:** Post-hoc threshold calibration for stenosis to exploit the AUC=0.748 Significant signal. Plaque branch investigation separate.
+
 ---
 
 ## Performance Summary
