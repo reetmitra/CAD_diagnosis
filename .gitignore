@@ -37,6 +37,11 @@ data/
 logs/
 *.log
 
+# Evaluation results and tensorboard runs
+results*.json
+runs*/
+runs/
+
 # OS
 .DS_Store
 Thumbs.db
