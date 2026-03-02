@@ -236,19 +236,28 @@ def sc2od_targets(sc_point_data, seq_length):
 
 
 class dual_task_contrastive_loss(nn.Module):
-    def __init__(self, od_contrastive_loss, sc_contrastive_loss, seq_length):
+    def __init__(self, od_contrastive_loss, sc_contrastive_loss, seq_length,
+                 confidence_threshold=0.0):
         super().__init__()
 
         self.od_contrastive_loss = od_contrastive_loss
         self.sc_contrastive_loss = sc_contrastive_loss
         self.matcher = self.od_contrastive_loss.matcher
         self.seq_length = seq_length
+        self.confidence_threshold = confidence_threshold
 
     def _get_object_detection_targets(self, sc_outputs):
 
         ret_sc_targets = []
         for batch in sc_outputs["pred_logits"]:
-            labels = torch.argmax(batch, dim=1)
+            probs = torch.softmax(batch, dim=1)
+            max_probs, labels = torch.max(probs, dim=1)
+
+            # Confidence gating: zero out low-confidence predictions
+            if self.confidence_threshold > 0:
+                labels = labels.clone()
+                labels[max_probs < self.confidence_threshold] = 0  # treat as background
+
             ret_sc_targets.append({"labels": labels})
         return sc2od_targets(ret_sc_targets, self.seq_length)
 
@@ -268,13 +277,24 @@ class dual_task_contrastive_loss(nn.Module):
             boxes = od_outputs["pred_boxes"][batch_idx]
             selected_logits = logits[indices]
             selected_boxes = boxes[indices][:, [0, 2]]
-            pred_classes = torch.argmax(selected_logits, dim=1)
+
+            # Confidence gating: only use high-confidence predictions
+            probs = torch.softmax(selected_logits, dim=1)
+            max_probs, pred_classes = torch.max(probs, dim=1)
 
             # Filter out no-object predictions (class index == num_classes)
             num_classes = selected_logits.shape[-1] - 1  # last class is no-object
             is_object = pred_classes < num_classes
-            filtered_labels = pred_classes[is_object]
-            filtered_boxes = selected_boxes[is_object]
+
+            # Also filter by confidence threshold
+            if self.confidence_threshold > 0:
+                is_confident = max_probs >= self.confidence_threshold
+                mask = is_object & is_confident
+            else:
+                mask = is_object
+
+            filtered_labels = pred_classes[mask]
+            filtered_boxes = selected_boxes[mask]
 
             ret_od_targets.append({"labels": filtered_labels, "boxes": filtered_boxes})
 
@@ -297,13 +317,16 @@ class dual_task_contrastive_loss(nn.Module):
 class spatio_temporal_contrast_loss(nn.Module):
     def __init__(self, num_classes=2, seq_length=32, eos_coef=0.2,
                  delta=1.0, sc_class_weights=None,
-                 use_focal=False, focal_gamma=2.0):
+                 use_focal=False, focal_gamma=2.0,
+                 dc_confidence_threshold=0.0):
         super().__init__()
 
         self.num_classes = num_classes
         self.seq_length = seq_length
         self.eos_coef = eos_coef
         self.delta = delta
+        # dc_weight can be overridden per-epoch for delayed ramp
+        self.dc_weight = delta
 
         self.od_loss = object_detection_loss(num_classes=self.num_classes, eos_coef=self.eos_coef,
                                              matcher=funcs.HungarianMatcher())
@@ -311,7 +334,13 @@ class spatio_temporal_contrast_loss(nn.Module):
             num_classes=self.num_classes + 1, seq_length=self.seq_length,
             class_weights=sc_class_weights,
             use_focal=use_focal, focal_gamma=focal_gamma)
-        self.dc_loss = dual_task_contrastive_loss(self.od_loss, self.sc_loss, seq_length=self.seq_length)
+        self.dc_loss = dual_task_contrastive_loss(
+            self.od_loss, self.sc_loss, seq_length=self.seq_length,
+            confidence_threshold=dc_confidence_threshold)
+
+    def set_dc_weight(self, weight):
+        """Set the current dc loss weight (for delayed ramp scheduling)."""
+        self.dc_weight = weight
 
     def forward(self, od_outputs, sc_outputs, od_targets):
 
@@ -320,7 +349,7 @@ class spatio_temporal_contrast_loss(nn.Module):
         od_targets_od = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         od_targets_sc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
 
-        dc_loss_val = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * self.delta
+        dc_loss_val = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * self.dc_weight
         od_loss_val = self.od_loss(od_outputs, od_targets_od)
         sc_loss_val = self.sc_loss(sc_outputs, od2sc_targets(od_targets_sc, self.seq_length))
         total_loss = dc_loss_val + od_loss_val + sc_loss_val

@@ -127,6 +127,17 @@ def parse_args(argv=None):
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Gamma (focusing param) for focal loss (default: 2.0)')
 
+    # --- Ldc improvements ---
+    parser.add_argument('--dc_warmup_hold', type=int, default=0,
+                        help='Hold dc_weight=0 for this many epochs (default: 0)')
+    parser.add_argument('--dc_warmup_ramp', type=int, default=0,
+                        help='Linearly ramp dc_weight from 0 to delta over this many epochs '
+                             'after the hold period (default: 0)')
+    parser.add_argument('--dc_confidence_threshold', type=float, default=0.0,
+                        help='Min softmax confidence for Ldc pseudo-labels (default: 0.0 = no gating)')
+    parser.add_argument('--balanced_sampling', action='store_true',
+                        help='Use class-balanced batch sampling (WeightedRandomSampler)')
+
     parser.add_argument('--log_dir', type=str, default='./runs',
                         help='Base directory for TensorBoard logs')
     parser.add_argument('--log_every', type=int, default=10,
@@ -265,6 +276,7 @@ class Trainer:
             sc_class_weights=sc_class_weights,
             use_focal=self.args.focal_loss,
             focal_gamma=self.args.focal_gamma,
+            dc_confidence_threshold=self.args.dc_confidence_threshold,
             temporal_encoder_layers=getattr(self.args, 'temporal_encoder_layers', None),
             temporal_heads=getattr(self.args, 'temporal_heads', None),
             spatial_encoder_layers=getattr(self.args, 'spatial_encoder_layers', None),
@@ -286,6 +298,7 @@ class Trainer:
     def setup_data(self):
         """Build train and eval dataloaders, respecting DDP and augmentation."""
         import augmentation as aug
+        from torch.utils.data import WeightedRandomSampler
 
         fw = self._fw
 
@@ -321,6 +334,12 @@ class Trainer:
                 rank=self.rank, shuffle=False,
             )
             shuffle_train = False  # sampler handles shuffling
+        elif self.args.balanced_sampling:
+            # Class-balanced sampling: weight each sample by inverse class frequency
+            sample_weights = self._compute_sample_weights(train_dataset)
+            self.train_sampler = WeightedRandomSampler(
+                sample_weights, num_samples=len(train_dataset), replacement=True)
+            shuffle_train = False  # sampler handles ordering
 
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size,
@@ -332,6 +351,50 @@ class Trainer:
             shuffle=False, sampler=eval_sampler,
             collate_fn=aug.collate_fn,
         )
+
+    def _compute_sample_weights(self, dataset):
+        """Compute per-sample weights for balanced sampling based on stenosis class."""
+        import numpy as np
+
+        # Determine the dominant class per sample (stenosis-level)
+        # For 6-class fine-tuning: 0=bg, 1-3=non-significant, 4-6=significant
+        # Map to stenosis: 0=healthy, 1=non-significant, 2=significant
+        class_counts = {0: 0, 1: 0, 2: 0}
+        sample_classes = []
+
+        for i in range(len(dataset)):
+            if dataset.file_indices is not None:
+                idx = dataset.file_indices[i]
+            else:
+                idx = i + dataset.data_start
+
+            labels_file = os.path.join(dataset.labels_root, dataset.labels_file_list[idx])
+            labels = np.loadtxt(labels_file).astype(np.int32)
+
+            # Determine stenosis class: healthy (all 0), non-sig (any 1-3), sig (any 4-6)
+            max_label = int(labels.max())
+            if max_label == 0:
+                sc = 0  # healthy
+            elif max_label <= 3:
+                sc = 1  # non-significant
+            else:
+                sc = 2  # significant
+            sample_classes.append(sc)
+            class_counts[sc] += 1
+
+        # Inverse frequency weights
+        total = len(sample_classes)
+        num_classes = len(class_counts)
+        class_weights = {c: total / (num_classes * max(count, 1))
+                         for c, count in class_counts.items()}
+        sample_weights = [class_weights[c] for c in sample_classes]
+
+        if self.is_main:
+            print(f"  [Balanced Sampling] Class distribution: {class_counts}")
+            wt_str = {c: round(w, 2) for c, w in class_weights.items()}
+            print(f"  [Balanced Sampling] Class weights: {wt_str}")
+
+        return sample_weights
 
     def setup_optimizer(self):
         """Create optimizer with optional layer-wise LR and warmup+cosine scheduler."""
@@ -401,11 +464,31 @@ class Trainer:
     # training
     # ------------------------------------------------------------------
 
+    def _compute_dc_weight(self, epoch):
+        """Compute dc loss weight for this epoch (delayed ramp schedule)."""
+        hold = self.args.dc_warmup_hold
+        ramp = self.args.dc_warmup_ramp
+
+        if hold == 0 and ramp == 0:
+            return self.args.delta  # no scheduling
+
+        if epoch < hold:
+            return 0.0
+        elif ramp > 0 and epoch < hold + ramp:
+            progress = (epoch - hold) / ramp
+            return self.args.delta * progress
+        else:
+            return self.args.delta
+
     def train_one_epoch(self, epoch):
         """Run one training epoch. Returns (avg_loss, avg_od, avg_sc, avg_dc)."""
         self.model.train()
-        if self.train_sampler is not None:
+        if self.train_sampler is not None and hasattr(self.train_sampler, 'set_epoch'):
             self.train_sampler.set_epoch(epoch)
+
+        # Update dc weight for delayed ramp
+        dc_weight = self._compute_dc_weight(epoch)
+        self.loss_fn.set_dc_weight(dc_weight)
 
         total_loss = 0.0
         total_od = 0.0
@@ -632,9 +715,10 @@ class Trainer:
             elapsed = time.time() - epoch_start
 
             if self.is_main:
+                dc_w = self._compute_dc_weight(epoch)
                 print(f"Epoch [{epoch}/{self.args.epochs}] "
                       f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-                      f"LR: {current_lr:.6f} | Time: {elapsed:.1f}s")
+                      f"LR: {current_lr:.6f} | DC_w: {dc_w:.3f} | Time: {elapsed:.1f}s")
 
                 # ---- TensorBoard epoch-level logging ----
                 if self.writer is not None:
@@ -655,6 +739,8 @@ class Trainer:
 
                     self.writer.add_scalar('LR/learning_rate',
                                            current_lr, epoch)
+                    self.writer.add_scalar('Schedule/dc_weight',
+                                           dc_w, epoch)
 
                     # Per-group LRs when layer-wise LR is enabled
                     if self.args.layerwise_lr:
@@ -746,6 +832,13 @@ class Trainer:
             print(f"  Early stopping:   disabled")
         print(f"  Augmentation:     {self.args.augment}")
         print(f"  Delta (DC wt):    {self.args.delta}")
+        if self.args.dc_warmup_hold > 0 or self.args.dc_warmup_ramp > 0:
+            print(f"  DC warmup:        hold={self.args.dc_warmup_hold}, "
+                  f"ramp={self.args.dc_warmup_ramp}")
+        if self.args.dc_confidence_threshold > 0:
+            print(f"  DC confidence:    {self.args.dc_confidence_threshold}")
+        if self.args.balanced_sampling:
+            print(f"  Balanced sample:  True")
         print(f"  SC class weight:  {self.args.sc_class_weight}")
         print(f"  Focal loss:       {self.args.focal_loss}"
               + (f" (gamma={self.args.focal_gamma})" if self.args.focal_loss else ""))

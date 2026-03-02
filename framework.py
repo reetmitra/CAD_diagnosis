@@ -18,6 +18,7 @@ class sc_net_framework:
     def __init__(self, pattern='pre_training', state_dict_root=None, data_root=None,
                  delta=1.0, sc_class_weights=None,
                  use_focal=False, focal_gamma=2.0,
+                 dc_confidence_threshold=0.0,
                  temporal_encoder_layers=None, temporal_heads=None,
                  spatial_encoder_layers=None, spatial_decoder_layers=None):
 
@@ -34,6 +35,7 @@ class sc_net_framework:
         # Store focal loss settings
         self._use_focal = use_focal
         self._focal_gamma = focal_gamma
+        self._dc_confidence_threshold = dc_confidence_threshold
 
         # Store transformer overrides
         self._temporal_encoder_layers = temporal_encoder_layers
@@ -64,7 +66,8 @@ class sc_net_framework:
 
             self.loss_fn = self.get_loss_fn(delta=delta, sc_class_weights=sc_class_weights,
                                                use_focal=self._use_focal,
-                                               focal_gamma=self._focal_gamma)
+                                               focal_gamma=self._focal_gamma,
+                                               dc_confidence_threshold=self._dc_confidence_threshold)
             self.dataLoader_train, self.dataLoader_eval, self.dataLoader_test = self.get_dataloader()
 
     def get_model(self):
@@ -109,7 +112,8 @@ class sc_net_framework:
         )
 
     def get_loss_fn(self, delta=1.0, sc_class_weights=None,
-                    use_focal=False, focal_gamma=2.0):
+                    use_focal=False, focal_gamma=2.0,
+                    dc_confidence_threshold=0.0):
         return opt_fn.spatio_temporal_contrast_loss(
             num_classes=self.model_num_classes,
             seq_length=opt.net_params["cubeseq_length"],
@@ -118,6 +122,7 @@ class sc_net_framework:
             sc_class_weights=sc_class_weights,
             use_focal=use_focal,
             focal_gamma=focal_gamma,
+            dc_confidence_threshold=dc_confidence_threshold,
         )
 
     def get_dataloader(self):

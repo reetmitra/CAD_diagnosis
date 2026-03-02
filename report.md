@@ -927,6 +927,124 @@ All plaque predictions collapsed to Calcified majority class. AUC: Calcified=0.4
 
 4. **Next step:** Post-hoc threshold calibration for stenosis to exploit the AUC=0.748 Significant signal. Plaque branch investigation separate.
 
+#### 7.6 Threshold Calibration (2026-03-02)
+
+Implemented post-hoc threshold calibration to rescue the strong AUC signal without retraining:
+
+**Method:** Per-class threshold scaling — `pred = argmax(p_i / t_i)` where `t_i` is a per-class threshold optimized on the validation split (15% of dataset/train, 444 samples). Grid search over 50 steps per class to maximize macro F1.
+
+**Calibration thresholds found:** Healthy=3.0, Non-significant=1.0, Significant=0.346
+
+**Held-out test results (dataset/test/, 665 AP-NUH patients):**
+
+| Metric | Before (argmax) | After (calibrated) | Delta |
+|--------|-----------------|-------------------|-------|
+| Stenosis ACC | 0.328 | **0.435** | +0.107 |
+| Stenosis Macro F1 | 0.210 | **0.393** | +0.183 |
+| Significant F1 | 0.000 | **0.525** | +0.525 |
+| Significant Recall | 0.000 | **0.553** | +0.553 |
+| Healthy F1 | 0.157 | **0.523** | +0.366 |
+
+**Key findings:**
+1. Calibration nearly doubled macro F1 (0.210 → 0.393) without any retraining
+2. Significant class went from zero predictions to P=0.500, R=0.553, F1=0.525
+3. Non-significant class is sacrificed (F1 0.474 → 0.132) as thresholds push predictions toward Healthy and Significant
+4. Plaque calibration had no effect — AUC near chance (0.547), no discriminative signal to rescue
+
+---
+
+### Phase 8: Ldc Training Improvements + v7-ft Launch (2026-03-02)
+
+Analysis of v6-ft revealed two problems limiting further progress:
+1. **Plaque branch collapse:** 100% Calcified predictions, AUC=0.547 (chance level). The 6-class joint encoding (stenosis × plaque) means plaque composition is a secondary signal — subtler texture differences overwhelmed by the dominant stenosis gradient.
+2. **Model peaked at epoch 9 during warmup:** The contrastive loss (L_dc) was active from epoch 0 with noisy pseudo-labels from randomly-initialized classification heads, creating confirmation bias that prevented further learning.
+
+#### 8.1 Implemented Improvements
+
+Three improvements targeting L_dc training stability:
+
+**1. Delayed Ldc Ramp** (`train.py`, `optimization.py`)
+
+| Parameter | Value |
+|-----------|-------|
+| `--dc_warmup_hold` | 20 epochs (dc_weight=0) |
+| `--dc_warmup_ramp` | 20 epochs (linear ramp 0→delta) |
+
+Rationale: L_dc uses pseudo-labels from each branch's predictions. Early in training, these predictions are near-random, so L_dc provides noisy/harmful supervision. By holding dc_weight=0 for 20 epochs, both branches learn independently from ground truth (L_od + L_sc only). The ramp from epoch 20-40 gradually introduces cross-supervision as predictions become meaningful.
+
+Implementation:
+- `spatio_temporal_contrast_loss.set_dc_weight(weight)` — called per-epoch by trainer
+- `Trainer._compute_dc_weight(epoch)` — computes weight based on hold/ramp schedule
+- DC weight logged to TensorBoard (`Schedule/dc_weight`)
+
+**2. Confidence-Gated Ldc Pseudo-Labels** (`optimization.py`)
+
+| Parameter | Value |
+|-----------|-------|
+| `--dc_confidence_threshold` | 0.7 |
+
+Rationale: Even after the ramp period, not all predictions are reliable. Only predictions where `max(softmax) >= 0.7` are used as pseudo-labels; low-confidence predictions are treated as background (label 0) and excluded from cross-supervision.
+
+Implementation:
+- `dual_task_contrastive_loss._get_object_detection_targets()` — SC→OD: low-confidence sampling point predictions set to background before converting to OD targets
+- `dual_task_contrastive_loss._get_sampling_point_classification_targets()` — OD→SC: low-confidence OD query predictions filtered out (combined with existing no-object filter)
+
+**3. Class-Balanced Batch Sampling** (`train.py`)
+
+| Parameter | Value |
+|-----------|-------|
+| `--balanced_sampling` | flag |
+
+Rationale: The training set is imbalanced — most arteries are Non-significant stenosis. `WeightedRandomSampler` with inverse-frequency weights ensures all stenosis classes (Healthy, Non-significant, Significant) are equally represented in each epoch.
+
+Implementation:
+- `Trainer._compute_sample_weights()` — reads label files, maps to stenosis class (0=healthy, 1=non-sig, 2=significant), computes inverse-frequency weights
+- Only active in single-GPU mode (incompatible with `DistributedSampler`)
+
+#### 8.2 Files Changed
+
+| File | Lines changed | What |
+|------|--------------|------|
+| `optimization.py` | +33 lines | `dual_task_contrastive_loss`: confidence gating in both pseudo-label directions; `spatio_temporal_contrast_loss`: `set_dc_weight()` + dynamic `dc_weight` |
+| `train.py` | +97 lines | 4 new CLI args, `_compute_dc_weight()` schedule, `_compute_sample_weights()`, DC weight logging to TensorBoard + epoch summary |
+| `framework.py` | +6 lines | Pass `dc_confidence_threshold` through to loss construction |
+
+#### 8.3 v7-ft Training Launch
+
+| Parameter | Value |
+|-----------|-------|
+| Mode | fine_tuning (num_classes=6) |
+| Pre-trained backbone | `checkpoints_v6/best_model.pth` (epoch 8, val 3.22) |
+| LR | 5e-6 |
+| Weight decay | 1e-4 |
+| Warmup | 5 epochs |
+| Patience | 30, min_delta=0.001 |
+| Focal loss | gamma=2.0 |
+| DC warmup | hold=20, ramp=20 |
+| DC confidence | 0.7 |
+| Epochs | 100 |
+| GPUs | 2x RTX 3090 (DDP) |
+| Effective batch | 8 (2 × 2 GPUs × 2 accum) |
+| Checkpoint dir | `checkpoints_v7_finetune/` |
+| TensorBoard | `runs_v7_finetune/` |
+
+**Expected improvements over v6-ft:**
+- Epochs 0-19: L_od + L_sc only → both branches learn reliable representations from ground truth
+- Epochs 20-40: L_dc gradually introduced with confidence gating → only high-quality pseudo-labels contribute
+- Epochs 40+: Full L_dc weight with continued confidence gating → stable cross-supervision
+- Result: model should continue improving beyond epoch 9 (v6-ft's peak), since L_dc noise no longer caps early learning
+
+**Evaluation plan:** After training completes, run calibration + held-out test evaluation:
+```bash
+python calibrate.py --checkpoint ./checkpoints_v7_finetune/best_model.pth \
+    --pattern fine_tuning --output calibration_thresholds.json --grid_steps 50
+python eval.py --checkpoint ./checkpoints_v7_finetune/best_model.pth \
+    --pattern fine_tuning --data_root ./dataset/test \
+    --thresholds calibration_thresholds.json \
+    --detailed --plot --plot_dir ./plots_v7ft_heldout_cal \
+    --save_results results_v7ft_heldout_calibrated.json
+```
+
 ---
 
 ## Performance Summary
@@ -935,11 +1053,13 @@ All plaque predictions collapsed to Calcified majority class. AUC: Calcified=0.4
 
 All fine-tuning evaluations use `fine_tuning` mode (6 classes) on 665 test files. Epoch reported is the best checkpoint epoch.
 
-| Run | Backbone | Backbone bugs | LR | Best val loss | Best ep | Stenosis ACC | Stenosis F1 | Stenosis AUC | Plaque ACC | SC ACC | Class discrimination |
-|-----|----------|---------------|----|--------------|---------|-------------|------------|-------------|-----------|--------|---------------------|
-| v5-ft | v5 ep39 (DDP) | Fixed 1–5 only | 1e-5 | 4.50 | ep10 | 0.316 | 0.160 | 0.577 | 0.630 | 0.792 | None (majority only) |
-| v2-ft | v2 ep139 | Bugs 6–8 present | 3e-6 | 5.05 | ep22 | 0.316 | — | 0.573 | 0.630 | — | None (majority only) |
-| **v6-ft** | **v6 ep8 (all fixed)** | **All 8 fixed** | **5e-6** | **4.14** | **ep9** | **0.328** | **0.210** | **0.604** | **0.606** | **0.806** | **Yes — 18 Healthy correct, Sig AUC 0.707** |
+| Run | Backbone | LR | Best ep | Stenosis ACC | Stenosis F1 | Stenosis AUC | Plaque ACC | SC ACC | Notes |
+|-----|----------|----|---------|-------------|------------|-------------|-----------|--------|-------|
+| v5-ft | v5 ep39 | 1e-5 | ep10 | 0.316 | 0.160 | 0.577 | 0.630 | 0.792 | Majority only |
+| v2-ft | v2 ep139 | 3e-6 | ep22 | 0.316 | — | 0.573 | 0.630 | — | Majority only |
+| v6-ft (argmax) | v6 ep8 | 5e-6 | ep9 | 0.328 | 0.210 | 0.604 | 0.606 | 0.806 | First class discrimination |
+| **v6-ft (calibrated)** | v6 ep8 | 5e-6 | ep9 | **0.435** | **0.393** | 0.604 | 0.606 | 0.806 | **Sig F1=0.525, R=0.553** |
+| v7-ft | v6 ep8 | 5e-6 | — | — | — | — | — | — | Running (Ldc improvements) |
 
 ### Before Fixes
 
@@ -996,22 +1116,27 @@ First evaluation in `fine_tuning` mode (6 classes). Epoch 10 only — training o
 
 Note: the ACC drop for stenosis (0.702 → 0.316) is not regression — it reflects the different test set distribution in fine_tuning mode (balanced 3-class: 198/210/257 vs. 2-class dominated by Non-significant in pre-training). AUC improvement is the correct metric to track at this stage.
 
-### After Phase 7 (v6-ft epoch 9 — first class discrimination)
+### After Phase 7 (v6-ft — first class discrimination + calibration)
 
-Comparison of all fine-tuning runs evaluated in `fine_tuning` mode on 665 test files. v6-ft is still running.
+Comparison of all fine-tuning runs. v6-ft evaluated on held-out test set (dataset/test/, 665 AP-NUH patients).
 
-| Task | Metric | v5-ft ep10 | v2-ft ep22 | v6-ft ep9 (running) | Paper target |
-|------|--------|-----------|-----------|---------------------|--------------|
-| Stenosis | ACC | 0.316 | 0.316 | **0.328** | **0.914** |
-| Stenosis | F1 | 0.160 | — | **0.210** | — |
-| Stenosis | AUC | 0.577 | 0.573 | **0.604** | — |
-| Stenosis | AUC (Significant only) | — | — | **0.707** | — |
-| Plaque | ACC | 0.630 | 0.630 | 0.606 | — |
-| Plaque | AUC | 0.508 | — | **0.547** | — |
-| SC Points | ACC | 0.792 | — | **0.806** | — |
-| Majority-class only? | | Yes | Yes | **No** | — |
+| Task | Metric | v5-ft ep10 | v2-ft ep22 | v6-ft argmax | v6-ft calibrated | Paper target |
+|------|--------|-----------|-----------|-------------|-----------------|--------------|
+| Stenosis | ACC | 0.316 | 0.316 | 0.328 | **0.435** | **0.914** |
+| Stenosis | F1 | 0.160 | — | 0.210 | **0.393** | — |
+| Stenosis | AUC | 0.577 | 0.573 | **0.604** | 0.604 | — |
+| Stenosis | Significant F1 | 0.000 | 0.000 | 0.000 | **0.525** | — |
+| Plaque | ACC | 0.630 | 0.630 | 0.606 | 0.606 | — |
+| SC Points | ACC | 0.792 | — | **0.806** | 0.806 | — |
 
-**Key milestone:** v6-ft is the first run to break majority-class-only prediction for stenosis, correctly classifying 18/31 predicted Healthy arteries. The Significant AUC of 0.707 at only epoch 9 (out of ~30 expected epochs) indicates the v6 backbone (all 8 bugs fixed) has already encoded discriminative internal representations that fine-tuning is now surfacing.
+**Key milestones:**
+1. v6-ft is the first run to break majority-class prediction (18 correct Healthy classifications)
+2. Threshold calibration rescued Significant class: F1 from 0.000 → 0.525 without retraining
+3. Gap to paper target (0.435 vs 0.914) addressed by v7-ft Ldc improvements (running)
+
+### After Phase 8 (v7-ft — Ldc improvements, running)
+
+v7-ft launched with delayed Ldc ramp (hold=20, ramp=20), confidence-gated pseudo-labels (threshold=0.7), from the same v6 backbone. Expected to surpass v6-ft by allowing 20 epochs of clean L_od + L_sc learning before introducing cross-supervision. Results pending.
 
 ### Pending (Bugs 18–22)
 
