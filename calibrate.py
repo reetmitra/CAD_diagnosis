@@ -41,8 +41,10 @@ from eval import (
 def parse_args():
     parser = argparse.ArgumentParser(
         description='SC-Net per-class threshold calibration')
-    parser.add_argument('--checkpoint', type=str, required=True,
-                        help='Path to model checkpoint')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to model checkpoint (single model)')
+    parser.add_argument('--ensemble', type=str, nargs='+', default=None,
+                        help='Two or more checkpoint paths to ensemble before calibrating')
     parser.add_argument('--pattern', type=str, default='fine_tuning',
                         choices=['pre_training', 'fine_tuning'])
     parser.add_argument('--data_root', type=str, default=None,
@@ -122,35 +124,62 @@ def search_plaque_thresholds(probs, gts, grid_steps=50):
 
 
 @torch.no_grad()
-def collect_val_probs(model, val_loader, device, num_classes):
-    """Run inference on the validation set, collect artery-level probs + GTs."""
-    model.eval()
+def collect_val_probs(models, val_loader, device, num_classes):
+    """Run inference on the validation set, collect artery-level probs + GTs.
+
+    Args:
+        models: single model or list of models. If a list, softmax probabilities
+                are averaged across all models (ensemble) before calibration.
+    """
+    import torch.nn.functional as F
+    if not isinstance(models, (list, tuple)):
+        models = [models]
+    for m in models:
+        m.eval()
+
     all_stenosis_probs = []
     all_stenosis_gts = []
     all_stenosis_preds = []  # baseline argmax predictions
     all_plaque_probs = []
     all_plaque_gts = []
 
+    n_models = len(models)
+    mode = f"ensemble ({n_models} models)" if n_models > 1 else "single model"
     print(f"\nCollecting probabilities on validation set "
-          f"({len(val_loader)} batches)...")
+          f"[{mode}] ({len(val_loader)} batches)...")
 
     for batch_idx, (images, targets) in enumerate(val_loader):
         images = images.to(device)
-        od_outputs, sc_outputs = model(images)
         batch_size = images.shape[0]
 
+        # Run all models
+        model_od_outputs = []
+        for m in models:
+            od_out, _ = m(images)
+            model_od_outputs.append(od_out)
+
         for i in range(batch_size):
-            od_out_i = {
-                'pred_logits': od_outputs['pred_logits'][i],
-                'pred_boxes': od_outputs['pred_boxes'][i],
-            }
             target_i = targets[i]
+            stenosis_gt, plaque_gt = targets_to_artery_level(target_i, num_classes)
 
-            stenosis_gt, plaque_gt = targets_to_artery_level(
-                target_i, num_classes)
-            stenosis_pred, _ = od_predictions_to_artery_level(
-                od_out_i, num_classes)
+            if n_models == 1:
+                od_out_i = {
+                    'pred_logits': model_od_outputs[0]['pred_logits'][i],
+                    'pred_boxes':  model_od_outputs[0]['pred_boxes'][i],
+                }
+            else:
+                probs_list = [
+                    F.softmax(m_out['pred_logits'][i], dim=-1)
+                    for m_out in model_od_outputs
+                ]
+                avg_probs = torch.stack(probs_list, dim=0).mean(dim=0)
+                avg_logits = torch.log(avg_probs.clamp(min=1e-8))
+                od_out_i = {
+                    'pred_logits': avg_logits,
+                    'pred_boxes':  model_od_outputs[0]['pred_boxes'][i],
+                }
 
+            stenosis_pred, _ = od_predictions_to_artery_level(od_out_i, num_classes)
             all_stenosis_gts.append(stenosis_gt)
             all_stenosis_preds.append(stenosis_pred)
 
@@ -185,25 +214,47 @@ def main():
 
     num_classes = 3 if args.pattern == 'pre_training' else 6
 
-    # Load model
-    print(f"\nLoading model in {args.pattern} mode...")
-    fw = sc_net_framework(
-        pattern=args.pattern,
-        state_dict_root=None,
-        data_root=args.data_root,
-    )
-    checkpoint = torch.load(args.checkpoint, map_location=device,
-                            weights_only=False)
-    if 'model_state_dict' in checkpoint:
-        fw.model.load_state_dict(checkpoint['model_state_dict'])
-        epoch = checkpoint.get('epoch', 'unknown')
-        print(f"Loaded checkpoint from epoch {epoch}")
-    else:
-        fw.model.load_state_dict(checkpoint)
-        print("Loaded model weights")
+    if not args.checkpoint and not args.ensemble:
+        print("Error: must provide --checkpoint or --ensemble.")
+        return
 
-    model = fw.model.to(device)
-    model.eval()
+    # Load model(s)
+    def _load_model(ckpt_path):
+        fw = sc_net_framework(
+            pattern=args.pattern,
+            state_dict_root=None,
+            data_root=args.data_root,
+        )
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        if 'model_state_dict' in ckpt:
+            fw.model.load_state_dict(ckpt['model_state_dict'])
+            epoch = ckpt.get('epoch', 'unknown')
+            print(f"  Loaded {ckpt_path} (epoch {epoch})")
+        else:
+            fw.model.load_state_dict(ckpt)
+            print(f"  Loaded {ckpt_path}")
+        return fw.model.to(device)
+
+    if args.ensemble:
+        print(f"\nLoading ensemble of {len(args.ensemble)} models "
+              f"in {args.pattern} mode...")
+        models = [_load_model(p) for p in args.ensemble]
+        # Use framework from first model for the val loader
+        fw = sc_net_framework(
+            pattern=args.pattern,
+            state_dict_root=None,
+            data_root=args.data_root,
+        )
+        checkpoint_label = args.ensemble
+    else:
+        print(f"\nLoading model in {args.pattern} mode...")
+        models = [_load_model(args.checkpoint)]
+        fw = sc_net_framework(
+            pattern=args.pattern,
+            state_dict_root=None,
+            data_root=args.data_root,
+        )
+        checkpoint_label = args.checkpoint
 
     # Use VALIDATION split (not test)
     val_loader = fw.dataLoader_eval
@@ -212,7 +263,7 @@ def main():
 
     # Collect probabilities
     sten_probs, sten_gts, sten_preds_baseline, plaque_probs, plaque_gts = \
-        collect_val_probs(model, val_loader, device, num_classes)
+        collect_val_probs(models, val_loader, device, num_classes)
 
     # Baseline metrics (argmax, t=[1,1,1])
     baseline_preds = sten_probs.argmax(axis=1)
@@ -305,7 +356,7 @@ def main():
         'val_calibrated_metrics': {
             k: float(v) for k, v in cal_metrics.items()
         },
-        'checkpoint': args.checkpoint,
+        'checkpoint': checkpoint_label,
         'pattern': args.pattern,
         'grid_steps': args.grid_steps,
     }

@@ -1061,7 +1061,8 @@ def ensemble_forward(models, image, device, tta=False, tta_k=5):
 
 @torch.no_grad()
 def evaluate_ensemble(models, test_loader, device, num_classes, eval_sc=False,
-                      tta=False, tta_k=5, detailed=False):
+                      tta=False, tta_k=5, detailed=False, thresholds=None,
+                      plaque_thresholds=None):
     """Run ensemble evaluation on test set.
 
     Same interface as evaluate() but uses multiple models and averages their
@@ -1076,6 +1077,8 @@ def evaluate_ensemble(models, test_loader, device, num_classes, eval_sc=False,
         tta: if True, enable TTA within each model
         tta_k: number of TTA augmentations per model
         detailed: if True, also collect softmax probabilities for AUC-ROC
+        thresholds: list of 3 stenosis per-class thresholds (or None for argmax)
+        plaque_thresholds: list of 3 plaque per-class thresholds (or None for argmax)
 
     Returns:
         Same as evaluate(): (stenosis_metrics, plaque_metrics, sc_metrics, detailed_data)
@@ -1088,8 +1091,9 @@ def evaluate_ensemble(models, test_loader, device, num_classes, eval_sc=False,
     all_plaque_preds = []
     all_plaque_gts = []
 
-    all_stenosis_probs = [] if detailed else None
-    all_plaque_probs = [] if detailed else None
+    collect_probs = detailed or (thresholds is not None) or (plaque_thresholds is not None)
+    all_stenosis_probs = [] if collect_probs else None
+    all_plaque_probs = [] if collect_probs else None
 
     sc_correct = 0
     sc_total = 0
@@ -1118,7 +1122,7 @@ def evaluate_ensemble(models, test_loader, device, num_classes, eval_sc=False,
             all_stenosis_preds.append(stenosis_pred)
             all_stenosis_gts.append(stenosis_gt)
 
-            if detailed:
+            if collect_probs:
                 _collect_artery_probs(
                     od_out_i, num_classes, stenosis_gt, plaque_gt,
                     all_stenosis_probs, all_plaque_probs)
@@ -1140,6 +1144,28 @@ def evaluate_ensemble(models, test_loader, device, num_classes, eval_sc=False,
             print(f"  Processed {batch_idx + 1}/{len(test_loader)} batches")
 
     print(f"Evaluation complete: {len(all_stenosis_gts)} samples\n")
+
+    # Apply per-class thresholds if provided (overrides argmax predictions)
+    if thresholds is not None and all_stenosis_probs is not None:
+        t = np.array(thresholds, dtype=np.float64)
+        prob_array = np.array(all_stenosis_probs)
+        scaled = prob_array / t[np.newaxis, :]
+        all_stenosis_preds = scaled.argmax(axis=1).tolist()
+        unique, counts = np.unique(all_stenosis_preds, return_counts=True)
+        dist = dict(zip(unique.tolist(), counts.tolist()))
+        print(f"[Thresholds applied] t={t.tolist()}")
+        print(f"  Prediction distribution: {dist}")
+
+    if (plaque_thresholds is not None and all_plaque_probs is not None
+            and len(all_plaque_probs) > 0):
+        pt = np.array(plaque_thresholds, dtype=np.float64)
+        plaque_prob_array = np.array(all_plaque_probs)
+        scaled = plaque_prob_array / pt[np.newaxis, :]
+        all_plaque_preds = scaled.argmax(axis=1).tolist()
+        unique, counts = np.unique(all_plaque_preds, return_counts=True)
+        dist = dict(zip(unique.tolist(), counts.tolist()))
+        print(f"[Plaque thresholds applied] t={pt.tolist()}")
+        print(f"  Plaque prediction distribution: {dist}")
 
     # Compute metrics (same logic as evaluate())
     stenosis_metrics = compute_metrics(all_stenosis_gts, all_stenosis_preds, num_classes=3)
@@ -1164,7 +1190,7 @@ def evaluate_ensemble(models, test_loader, device, num_classes, eval_sc=False,
             sc_metrics = {'acc': 0.0, 'total_points': 0, 'correct_points': 0}
 
     detailed_data = None
-    if detailed:
+    if collect_probs:
         detailed_data = {
             'stenosis_gts': all_stenosis_gts,
             'stenosis_preds': all_stenosis_preds,
@@ -1623,7 +1649,8 @@ def main():
 
         stenosis_metrics, plaque_metrics, sc_metrics, detailed_data = evaluate_ensemble(
             models, test_loader, device, num_classes, eval_sc=args.eval_sc,
-            tta=args.tta, tta_k=args.tta_k, detailed=args.detailed
+            tta=args.tta, tta_k=args.tta_k, detailed=args.detailed,
+            thresholds=thresholds, plaque_thresholds=plaque_thresholds,
         )
 
     # --- Single model mode ---
