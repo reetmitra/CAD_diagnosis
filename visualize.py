@@ -9,11 +9,17 @@ Usage:
   # Ground truth only
   python visualize.py --data_root ./dataset/test --pattern testing --output_dir ./viz_gt
 
-  # With model predictions
+  # Single-model with GT/Pred bars (recommended)
   python visualize.py --data_root ./dataset/test --pattern testing \\
       --checkpoint checkpoints_v7_finetune/final_model.pth \\
       --thresholds calibration_thresholds_v7_constrained.json --use_constrained \\
       --output_dir ./viz_v7ft
+  #
+  #  Output layout per PNG:
+  #    Row 0: longitudinal CT strip with GT bands + TP/FN/FP boxes
+  #    Row 1 (GT bar):   black=normal slice, red=abnormal (per-slice GT)
+  #    Row 2 (Pred bar): black=no prediction, red=prediction fires here
+  #    Row 3: cross-section panels (up to 4 labelled segments)
 
   # Before/After comparison (pre-trained vs fine-tuned)
   python visualize.py --data_root ./dataset/test --pattern testing \\
