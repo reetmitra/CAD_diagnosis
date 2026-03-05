@@ -373,7 +373,7 @@ def render_artery(artery_id, volume, labels, save_path,
 
             # Map class index to stenosis group for colour
             if num_classes == 6:
-                sten_group = 0 if cls < 2 else 2  # 0,1 → Non-sig; 2-5 → Sig
+                sten_group = 1 if cls < 2 else 2  # 0,1 → Non-sig; 2-5 → Sig
             else:
                 sten_group = 1
             colour = PRED_COLOURS.get(sten_group, '#FFFFFF')
