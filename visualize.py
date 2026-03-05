@@ -115,10 +115,23 @@ def main():
         if args.max_samples > 0 and saved >= args.max_samples:
             break
         vol, labels = load_volume_and_labels(vol_path, lbl_path)
-        print(f"  {artery_id}: vol={vol.shape}, labels={np.unique(labels)}")
+
+        # Derive GT stenosis class for filename
+        gt_labels = labels[labels > 0]
+        if len(gt_labels) == 0:
+            sten_tag = 'Healthy'
+        elif np.any(gt_labels >= 3):
+            sten_tag = 'Sig'
+        else:
+            sten_tag = 'NonSig'
+
+        filename = f'{artery_id}__sten_{sten_tag}.png'
+        save_path = os.path.join(args.output_dir, filename)
+        render_artery_gt_only(artery_id, vol, labels, save_path)
+        print(f"  Saved: {filename}")
         saved += 1
 
-    print(f"Done: {saved} arteries listed.")
+    print(f"Done: {saved} PNGs saved to '{args.output_dir}'.")
 
 
 def get_file_pairs(data_root, pattern):
@@ -170,6 +183,100 @@ def load_volume_and_labels(vol_path, lbl_path):
         vol = vol.transpose(2, 0, 1)
     labels = np.loadtxt(lbl_path).astype(np.int32)
     return vol, labels
+
+
+def render_artery_gt_only(artery_id, volume, labels, save_path):
+    """Render longitudinal CPR strip with GT label bands + cross-section panels.
+
+    Args:
+        artery_id:  str, used in title
+        volume:     np.ndarray (256, 64, 64), raw HU
+        labels:     np.ndarray (256,), int32 raw labels
+        save_path:  str, output PNG path
+    """
+    segments = decode_label_segments(labels)
+
+    # ── Longitudinal strip: centre cross-section row across all z ──────────
+    # volume[:, 32, :] → (256, 64), transpose → (64, 256) so x=vessel axis
+    strip = volume[:, 32, :].T   # shape (64, 256)
+    strip_norm = normalize_ct_data(strip, hu_min=HU_MIN, hu_max=HU_MAX)
+
+    # ── Cross-section positions: centre of each labelled segment ───────────
+    cs_positions = [((s + e) // 2, lbl) for s, e, lbl in segments]
+    cs_positions = cs_positions[:4]   # cap at 4 panels
+    n_cs = max(len(cs_positions), 1)
+
+    # ── Figure layout ──────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(max(14, n_cs * 4), 7))
+    gs = fig.add_gridspec(2, n_cs, height_ratios=[3, 2], hspace=0.4, wspace=0.3)
+
+    # Row 0: longitudinal strip (spans all columns)
+    ax_long = fig.add_subplot(gs[0, :])
+    ax_long.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
+                   vmin=0, vmax=1)
+
+    # GT label bands
+    for seg_start, seg_end, raw_lbl in segments:
+        colour = RAW_LABEL_COLOURS.get(raw_lbl)
+        if colour is not None:
+            ax_long.axvspan(seg_start, seg_end, alpha=0.35, color=colour,
+                            label=f'Raw {raw_lbl}')
+
+    ax_long.set_xlabel('Vessel axis position (slice index)')
+    ax_long.set_ylabel('Cross-section (px)')
+    ax_long.set_title(f'{artery_id}   |   GT labels: {np.unique(labels[labels>0]).tolist()}')
+
+    # Row 1: cross-section panels
+    for col, (z_idx, raw_lbl) in enumerate(cs_positions):
+        ax_cs = fig.add_subplot(gs[1, col])
+        cs_img = normalize_ct_data(volume[z_idx], hu_min=HU_MIN, hu_max=HU_MAX)
+        ax_cs.imshow(cs_img, cmap='gray', vmin=0, vmax=1, origin='upper')
+        colour = RAW_LABEL_COLOURS.get(raw_lbl, 'white')
+        ax_cs.set_title(f'z={z_idx}  raw={raw_lbl}', color=colour or 'white',
+                        fontsize=9)
+        ax_cs.axis('off')
+
+    # Fill unused cross-section columns with blank axes
+    for col in range(len(cs_positions), n_cs):
+        ax_blank = fig.add_subplot(gs[1, col])
+        ax_blank.axis('off')
+
+    # Legend
+    legend_patches = []
+    for raw_lbl, colour in RAW_LABEL_COLOURS.items():
+        if raw_lbl == 0 or colour is None:
+            continue
+        name = f'Raw {raw_lbl}'
+        legend_patches.append(mpatches.Patch(color=colour, alpha=0.6, label=name))
+    if legend_patches:
+        ax_long.legend(handles=legend_patches, loc='upper right', fontsize=7,
+                       ncol=len(legend_patches))
+
+    plt.savefig(save_path, bbox_inches='tight', dpi=100)
+    plt.close(fig)
+
+
+def decode_label_segments(labels):
+    """Convert a 256-length label array into contiguous segments.
+
+    Returns:
+        list of (start_idx, end_idx_exclusive, raw_label) for each non-zero run.
+        Background (0) runs are omitted.
+    """
+    segments = []
+    i = 0
+    n = len(labels)
+    while i < n:
+        lbl = labels[i]
+        if lbl == 0:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and labels[j] == lbl:
+            j += 1
+        segments.append((i, j, int(lbl)))
+        i = j
+    return segments
 
 
 if __name__ == '__main__':
