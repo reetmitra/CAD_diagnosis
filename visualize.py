@@ -107,9 +107,69 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # TODO: tasks 2-7 go here
+    pairs = get_file_pairs(args.data_root, args.pattern)
+    print(f"Found {len(pairs)} arteries in split '{args.pattern}'")
 
-    print("visualize.py scaffold OK")
+    saved = 0
+    for vol_path, lbl_path, artery_id in pairs:
+        if args.max_samples > 0 and saved >= args.max_samples:
+            break
+        vol, labels = load_volume_and_labels(vol_path, lbl_path)
+        print(f"  {artery_id}: vol={vol.shape}, labels={np.unique(labels)}")
+        saved += 1
+
+    print(f"Done: {saved} arteries listed.")
+
+
+def get_file_pairs(data_root, pattern):
+    """Return sorted list of (vol_path, lbl_path, artery_id) for the given split.
+
+    Uses the same deterministic sort + train_ratio split as cubic_sequence_data
+    (train_ratio=0.8) so indices are consistent with training/eval.
+    """
+    vol_dir = os.path.join(data_root, 'volumes')
+    lbl_dir = os.path.join(data_root, 'labels')
+    vol_files = sorted(os.listdir(vol_dir))
+    lbl_files = sorted(os.listdir(lbl_dir))
+    n = len(vol_files)
+    train_ratio = 0.8
+
+    if pattern == 'training':
+        start = 0
+        end = int(n * train_ratio)
+    elif pattern == 'validation':
+        start = int(n * train_ratio)
+        end = int(n * (train_ratio + (1 - train_ratio) / 2))
+    else:  # testing
+        start = int(n * (train_ratio + (1 - train_ratio) / 2))
+        end = n
+
+    pairs = []
+    for i in range(start, end):
+        vf = vol_files[i]
+        lf = lbl_files[i]
+        artery_id = os.path.splitext(vf)[0]   # strip .nii
+        pairs.append((
+            os.path.join(vol_dir, vf),
+            os.path.join(lbl_dir, lf),
+            artery_id,
+        ))
+    return pairs
+
+
+def load_volume_and_labels(vol_path, lbl_path):
+    """Load a CPR NIfTI volume and its per-slice label file.
+
+    Returns:
+        volume: np.ndarray shape (256, 64, 64), raw HU values
+        labels: np.ndarray shape (256,), int32, raw label values 0-6
+    """
+    img = nib.load(vol_path)
+    vol = img.get_fdata()                 # may be (64, 64, 256) or (256, 64, 64)
+    if vol.shape[0] == vol.shape[1]:      # (64, 64, 256) → transpose to (256, 64, 64)
+        vol = vol.transpose(2, 0, 1)
+    labels = np.loadtxt(lbl_path).astype(np.int32)
+    return vol, labels
 
 
 if __name__ == '__main__':
