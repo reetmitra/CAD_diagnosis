@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import json
 
@@ -678,7 +679,7 @@ def render_artery(artery_id, volume, labels, save_path,
         pred_coverage = np.zeros(D, dtype=int)
         for x0_norm, x1_norm in pred_ivs:
             start = max(0, int(x0_norm * D))
-            end   = min(D, int(x1_norm * D) + 1)
+            end   = min(D, math.ceil(x1_norm * D))
             pred_coverage[start:end] = 1
         _draw_label_bar(ax_pred_bar, pred_coverage, 'Pred')
 
