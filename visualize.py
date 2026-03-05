@@ -81,6 +81,98 @@ def _sten_gt_from_labels(labels):
     return 1       # Non-significant
 
 
+def iou_1d(a0, a1, b0, b1):
+    """1D intersection-over-union of intervals [a0,a1] and [b0,b1].
+
+    All arguments are floats in the same coordinate space.
+    Returns a float in [0, 1].
+    """
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    union = (a1 - a0) + (b1 - b0) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def match_predictions_to_gt(od_outputs, gt_segments, num_classes, D,
+                             conf_thresh=0.15, iou_thresh=0.3):
+    """Classify each predicted box and GT segment as TP/FN/FP via 1D IoU.
+
+    Args:
+        od_outputs: dict with 'pred_logits' shape [Q, C+1] and 'pred_boxes'
+                    shape [Q, 2] (center_norm, width_norm).
+        gt_segments: list of (start_idx, end_idx_exclusive, raw_label) in
+                     pixel coords.
+        num_classes: int C; queries whose predicted class == num_classes are
+                     no-object and are skipped.
+        D: int, vessel axis length (e.g. 256).
+        conf_thresh: float; skip queries whose max-class prob < this.
+        iou_thresh: float; IoU cutoff for a match.
+
+    Returns:
+        tp_pred_idx:    set of indices into surviving_queries that matched a GT.
+        fn_seg_idx:     set of GT segment indices that were never matched.
+        fp_pred_idx:    set of indices into surviving_queries that were not matched.
+        pred_intervals: list of (x0_norm, x1_norm) for each surviving query.
+        surviving_queries: list of original query indices [0..Q-1] that passed
+                           the conf/class filter.
+    """
+    pred_logits = od_outputs['pred_logits']   # [Q, C+1]
+    pred_boxes  = od_outputs['pred_boxes']    # [Q, 2]
+
+    probs        = F.softmax(pred_logits, dim=-1)          # [Q, C+1]
+    pred_classes = torch.argmax(probs, dim=-1)             # [Q]
+
+    # Step 1: filter surviving queries
+    # A query is kept only when its best foreground-class probability strictly
+    # exceeds the no-object-class probability AND meets conf_thresh.
+    surviving_queries = []
+    pred_intervals    = []
+    Q = pred_logits.shape[0]
+    for q in range(Q):
+        cls = pred_classes[q].item()
+        # Skip if argmax already landed on the no-object class
+        if cls >= num_classes:
+            continue
+        fg_prob = probs[q, cls].item()
+        no_obj_prob = probs[q, num_classes].item()
+        # Skip if no-object is at least as likely (handles ties with uniform logits)
+        if fg_prob <= no_obj_prob:
+            continue
+        if fg_prob < conf_thresh:
+            continue
+        cx = pred_boxes[q, 0].item()
+        w  = pred_boxes[q, 1].item()
+        x0 = cx - w / 2.0
+        x1 = cx + w / 2.0
+        surviving_queries.append(q)
+        pred_intervals.append((x0, x1))
+
+    # Step 2: build GT intervals in normalised coords
+    gt_intervals_norm = [(s / D, e / D) for s, e, _ in gt_segments]
+
+    # Step 3: greedy matching
+    matched_gt   = set()
+    tp_pred_idx  = set()
+
+    for i, (x0, x1) in enumerate(pred_intervals):
+        best_iou  = -1.0
+        best_gt_j = -1
+        for j, (g0, g1) in enumerate(gt_intervals_norm):
+            if j in matched_gt:
+                continue
+            iou = iou_1d(x0, x1, g0, g1)
+            if iou >= iou_thresh and iou > best_iou:
+                best_iou  = iou
+                best_gt_j = j
+        if best_gt_j >= 0:
+            matched_gt.add(best_gt_j)
+            tp_pred_idx.add(i)
+
+    fp_pred_idx = set(range(len(surviving_queries))) - tp_pred_idx
+    fn_seg_idx  = set(range(len(gt_segments))) - matched_gt
+
+    return tp_pred_idx, fn_seg_idx, fp_pred_idx, pred_intervals, surviving_queries
+
+
 # ─── Model helpers ────────────────────────────────────────────────────────────
 
 def load_thresholds(thresholds_path, use_constrained):
