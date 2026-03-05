@@ -355,12 +355,16 @@ def main():
 
         sten_gt = _sten_gt_from_labels(labels)
 
-        # Apply filter (based on model 1 predictions)
+        # Apply filter (considers both models in comparison mode)
         if args.filter == 'correct':
-            if stenosis_pred is None or stenosis_pred != sten_gt:
+            m1_correct = stenosis_pred is not None and stenosis_pred == sten_gt
+            m2_correct = stenosis_pred2 is None or stenosis_pred2 == sten_gt
+            if not (m1_correct and m2_correct):
                 continue
         elif args.filter == 'incorrect':
-            if stenosis_pred is None or stenosis_pred == sten_gt:
+            m1_wrong = stenosis_pred is not None and stenosis_pred != sten_gt
+            m2_wrong = stenosis_pred2 is not None and stenosis_pred2 != sten_gt
+            if not (m1_wrong or m2_wrong):
                 continue
         elif args.filter == 'healthy':
             if sten_gt != 0:
@@ -376,10 +380,11 @@ def main():
 
         # Build filename — include both model tags in comparison mode
         if comparison_mode:
-            m1_tag = ['Healthy', 'NonSig', 'Sig'][stenosis_pred] if stenosis_pred is not None else 'NA'
-            m2_tag = ['Healthy', 'NonSig', 'Sig'][stenosis_pred2] if stenosis_pred2 is not None else 'NA'
+            def _tag(pred): return ['Healthy', 'NonSig', 'Sig'][pred] if pred is not None else 'None'
+            def _result(pred): return ('CORRECT' if pred == sten_gt else 'WRONG') if pred is not None else 'NOPRED'
             filename = (f'{artery_id}__sten_{sten_tag}'
-                        f'_m1_{m1_tag}_m2_{m2_tag}.png')
+                        f'_m1_{_tag(stenosis_pred)}_{_result(stenosis_pred)}'
+                        f'_m2_{_tag(stenosis_pred2)}_{_result(stenosis_pred2)}.png')
         elif stenosis_pred is not None:
             pred_tag   = ['Healthy', 'NonSig', 'Sig'][stenosis_pred]
             correct_tag = 'CORRECT' if stenosis_pred == sten_gt else 'WRONG'
