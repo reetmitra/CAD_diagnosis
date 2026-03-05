@@ -15,6 +15,15 @@ Usage:
       --thresholds calibration_thresholds_v7_constrained.json --use_constrained \\
       --output_dir ./viz_v7ft
 
+  # Before/After comparison (pre-trained vs fine-tuned)
+  python visualize.py --data_root ./dataset/test --pattern testing \\
+      --checkpoint  checkpoints_v6/best_model.pth --model_pattern pre_training \\
+      --label "Pre-trained (v6)" \\
+      --checkpoint2 checkpoints_v7_finetune/final_model.pth \\
+      --thresholds2 calibration_thresholds_v7_constrained.json --use_constrained2 \\
+      --label2 "Fine-tuned v7 (constrained)" \\
+      --output_dir ./viz_comparison
+
   # Error analysis only
   python visualize.py ... --filter incorrect
 """
@@ -671,9 +680,10 @@ def render_artery(artery_id, volume, labels, save_path,
                 break
 
         # Border colour encoding:
-        #   green  = model 2 detected the segment (TP for model 2)
+        #   green  = both models detected the segment (both TP)
         #   orange = model 1 missed but model 2 caught (improvement from fine-tuning)
         #   red    = both models missed (FN in both)
+        #   purple = model 1 caught but model 2 missed (regression)
         #   white  = no GT at this position
         if seg_idx is None or raw_lbl == 0:
             border_colour = 'white'
@@ -683,8 +693,11 @@ def render_artery(artery_id, volume, labels, save_path,
         elif seg_idx in fn_idx1 and seg_idx in fn_idx2:
             # both models missed it
             border_colour = 'red'
+        elif seg_idx not in fn_idx1 and seg_idx in fn_idx2:
+            # model 1 caught it, model 2 missed it — regression
+            border_colour = 'purple'
         else:
-            # model 2 caught it (model 1 may or may not have)
+            # both models caught it
             border_colour = 'green'
 
         title_colour = RAW_LABEL_COLOURS.get(raw_lbl) or 'white'
