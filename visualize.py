@@ -69,6 +69,77 @@ HU_MIN = 300 - 900 / 2   # = -150
 HU_MAX = 300 + 900 / 2   # =  750
 
 
+# ─── Model helpers ────────────────────────────────────────────────────────────
+
+def load_thresholds(thresholds_path, use_constrained):
+    """Load per-class thresholds from a calibrate.py JSON file.
+
+    Returns:
+        stenosis_t: list of 3 floats, or None
+        plaque_t:   list of 3 floats, or None
+    """
+    if thresholds_path is None:
+        return None, None
+    with open(thresholds_path) as f:
+        data = json.load(f)
+    if use_constrained and 'constrained_stenosis_thresholds' in data:
+        stenosis_t = data['constrained_stenosis_thresholds']
+    else:
+        stenosis_t = data.get('stenosis_thresholds')
+    plaque_t = data.get('plaque_thresholds')
+    return stenosis_t, plaque_t
+
+
+@torch.no_grad()
+def predict_artery(model, volume, device, num_classes,
+                   stenosis_t=None, plaque_t=None):
+    """Run single-sample inference and return artery-level predictions + raw OD outputs.
+
+    Model output verified:
+        pred_logits shape: [B, Q, C+1] = [1, 16, 7]  (6 classes + 1 no-object)
+        pred_boxes  shape: [B, Q, 2]   = [1, 16, 2]
+
+    Args:
+        model:       SC-Net model in eval mode
+        volume:      np.ndarray (256, 64, 64), raw HU
+        device:      torch device
+        num_classes: 3 or 6
+        stenosis_t:  list of 3 thresholds or None (argmax)
+        plaque_t:    list of 3 thresholds or None (argmax)
+
+    Returns:
+        stenosis_pred: int 0-2
+        plaque_pred:   int 0-2 or -1
+        od_outputs:    raw dict with 'pred_logits' [Q, C+1] and 'pred_boxes' [Q, 2]
+    """
+    # Normalise and convert to tensor [1, D, H, W]
+    vol_norm = normalize_ct_data(volume, hu_min=HU_MIN, hu_max=HU_MAX)
+    tensor = torch.tensor(vol_norm, dtype=torch.float32).unsqueeze(0).to(device)
+
+    outputs = model(tensor)
+    od_out_raw = outputs[0]   # (od_outputs, sc_outputs) — take OD
+
+    # Squeeze batch dimension from logits/boxes
+    # Verified shapes: pred_logits [1, 16, 7], pred_boxes [1, 16, 2]
+    od_outputs = {
+        'pred_logits': od_out_raw['pred_logits'][0],   # [Q, C+1] = [16, 7]
+        'pred_boxes':  od_out_raw['pred_boxes'][0],    # [Q, 2]   = [16, 2]
+    }
+
+    if stenosis_t is not None:
+        # Apply per-class threshold scaling: pred = argmax(p_i / t_i)
+        logits = od_outputs['pred_logits']               # [Q, C+1]
+        probs  = F.softmax(logits, dim=-1)               # [Q, C+1]
+        # Build threshold vector matching logits dimension
+        t_vec = torch.ones(logits.shape[-1], dtype=torch.float32, device=device)
+        t_vec[:3] = torch.tensor(stenosis_t, dtype=torch.float32, device=device)
+        scaled_logits = torch.log(probs / t_vec.unsqueeze(0) + 1e-9)
+        od_outputs['pred_logits'] = scaled_logits
+
+    stenosis_pred, plaque_pred = od_predictions_to_artery_level(od_outputs, num_classes)
+    return stenosis_pred, plaque_pred, od_outputs
+
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -107,6 +178,21 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    device = get_device(args.device)
+    model = None
+    num_classes = 6 if args.model_pattern == 'fine_tuning' else 3
+    if args.checkpoint:
+        print(f"Loading model from {args.checkpoint}...")
+        model = _load_model_from_checkpoint(
+            args.checkpoint, args.model_pattern, device, args.data_root)
+        model.eval()
+
+    stenosis_t, plaque_t = load_thresholds(args.thresholds, args.use_constrained)
+    if stenosis_t:
+        print(f"  Stenosis thresholds: {stenosis_t}")
+    if plaque_t:
+        print(f"  Plaque thresholds:   {plaque_t}")
+
     pairs = get_file_pairs(args.data_root, args.pattern)
     print(f"Found {len(pairs)} arteries in split '{args.pattern}'")
 
@@ -115,6 +201,12 @@ def main():
         if args.max_samples > 0 and saved >= args.max_samples:
             break
         vol, labels = load_volume_and_labels(vol_path, lbl_path)
+
+        stenosis_pred, plaque_pred = None, None
+        od_outputs = None
+        if model is not None:
+            stenosis_pred, plaque_pred, od_outputs = predict_artery(
+                model, vol, device, num_classes, stenosis_t, plaque_t)
 
         # Derive GT stenosis class for filename
         gt_labels = labels[labels > 0]
