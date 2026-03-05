@@ -1556,3 +1556,62 @@ Temperature `τ` controls smoothness: `τ=1` is standard softmax, `τ>1` produce
 **Why:** Previously training only printed to stdout. Visual inspection of loss curves, gradient distributions, and attention maps is essential for diagnosing training issues (e.g., attention collapse, gradient explosion in one branch, L_dc dominating the total loss).
 
 **Implementation (completed):** `SummaryWriter` added to `train.py`. Logs per-epoch: total loss + components (L_od, L_sc, L_dc), validation metrics (ACC, F1, Spec), learning rate, gradient L2 norm. New CLI args: `--log_dir` (default: `runs/`), `--log_every`. Future extension: sample predictions overlaid on CPR volumes for visual inspection.
+
+---
+
+## Phase 8 — CPR Visualization & Before/After Pipeline Analysis (2026-03-05)
+
+**Commits:** `1b37796` scaffold → `3da1343` data loading → `9c58f44` GT rendering → `75e514f` model inference → `97965c3` prediction overlay → `0c4500c` fix sten_group → `436a391` polish → comparison mode commits
+
+### Motivation
+
+With v7-ft achieving Stenosis ACC=0.580 and AUC=0.713 (constrained calibration), the next step was to directly inspect what the model sees in the CPR images — and to make the improvement from fine-tuning visible at the artery level.
+
+### `visualize.py` Tool
+
+A standalone batch script (`visualize.py`) that renders one PNG per artery, showing:
+
+- **Longitudinal CPR strip**: grayscale `volume[:, 32, :].T` with the vessel axis as the x-axis (256 positions)
+- **GT label bands**: semi-transparent coloured `axvspan` overlays per contiguous label segment (raw labels 1–6, gold through dark-red)
+- **Model predictions**: TP (solid border box), FN (diagonal hatch on GT band), FP (dashed orange box) — computed via 1D IoU matching between predicted boxes and GT segments (threshold default 0.3)
+- **Cross-section panels** (up to 4): 64×64 axial slices at the centre of each GT segment; border colour encodes TP/FN state
+
+**Usage — GT only:**
+```bash
+python visualize.py --data_root ./dataset/test --pattern testing --output_dir ./viz_gt
+```
+
+**Usage — Before/After comparison:**
+```bash
+python visualize.py \
+  --data_root ./dataset/test --pattern testing \
+  --checkpoint  checkpoints_v6/best_model.pth --model_pattern pre_training \
+  --label "Pre-trained (v6)" \
+  --checkpoint2 checkpoints_v7_finetune/final_model.pth --model_pattern2 fine_tuning \
+  --thresholds2 calibration_thresholds_v7_constrained.json --use_constrained2 \
+  --label2 "Fine-tuned v7 (constrained)" \
+  --output_dir ./viz_comparison
+```
+
+In comparison mode, the figure shows two stacked longitudinal strips — one per model — with TP/FP/FN markers overlaid on each, so the improvement from fine-tuning is immediately visible at the detection level.
+
+### Key Finding: Full Pipeline Improvement
+
+The comparison mode directly visualises what fine-tuning achieves:
+
+| Model | Stenosis ACC | Non-sig Rec | Sig Rec | F1 |
+|-------|-------------|-------------|---------|-----|
+| Pre-trained only (v6) | ~0.40 | 0.00 | ~0.70 | ~0.35 |
+| Fine-tuned v7 (constrained) | **0.580** | **0.581** | **0.595** | **0.585** |
+
+The pre-trained model fires on the spatial branch (object queries) but lacks the lesion-type discrimination learned during fine-tuning. In the comparison PNGs, the pre-trained strip shows predominantly FN on Non-sig segments and FP detections without GT support, while the fine-tuned strip correctly matches GT segments with TP boxes.
+
+Cross-section panel borders encode the improvement:
+- **Green** border: TP in fine-tuned model (improvement achieved)
+- **Orange** border: FN in pre-trained, TP in fine-tuned (fine-tuning fixed this)
+- **Red** border: FN in both models (remaining hard cases)
+
+### Design Documents
+
+- `docs/plans/2026-03-05-cpr-visualization-design.md` — single-model visualization design
+- `docs/plans/2026-03-05-comparison-visualization-design.md` — before/after comparison design
