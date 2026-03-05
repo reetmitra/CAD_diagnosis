@@ -670,18 +670,22 @@ def render_artery(artery_id, volume, labels, save_path,
                 seg_idx = si
                 break
 
-        # Border colour
+        # Border colour encoding:
+        #   green  = model 2 detected the segment (TP for model 2)
+        #   orange = model 1 missed but model 2 caught (improvement from fine-tuning)
+        #   red    = both models missed (FN in both)
+        #   white  = no GT at this position
         if seg_idx is None or raw_lbl == 0:
             border_colour = 'white'
-        elif seg_idx not in fn_idx2:
-            # model 2 detected this segment (TP for model 2)
-            border_colour = 'green'
-        elif seg_idx in fn_idx1:
+        elif seg_idx in fn_idx1 and seg_idx not in fn_idx2:
+            # model 1 missed it, model 2 caught it — improvement!
+            border_colour = 'orange'
+        elif seg_idx in fn_idx1 and seg_idx in fn_idx2:
             # both models missed it
             border_colour = 'red'
         else:
-            # model 1 detected it, model 2 missed it
-            border_colour = 'orange'
+            # model 2 caught it (model 1 may or may not have)
+            border_colour = 'green'
 
         title_colour = RAW_LABEL_COLOURS.get(raw_lbl) or 'white'
         ax_cs.set_title(f'z={z_idx}  raw={raw_lbl}',
