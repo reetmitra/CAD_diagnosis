@@ -47,6 +47,9 @@ def parse_args():
                         help='Evaluation mode (determines num_classes)')
     parser.add_argument('--data_root', type=str, default=None,
                         help='Override test dataset root path')
+    parser.add_argument('--data_split', type=str, default='all',
+                        choices=['all', 'training', 'validation', 'testing'],
+                        help='Which subset of data_root to evaluate on; "all" uses the full folder (default: all)')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device: "auto", "cpu", "cuda:0", etc.')
     parser.add_argument('--batch_size', type=int, default=2,
@@ -1641,17 +1644,14 @@ def main():
         if args.data_root is not None:
             dataset_test = aug.cubic_sequence_data(
                 dataset_root=args.data_root,
-                pattern='testing',
+                pattern=args.data_split,
                 train_ratio=opt.data_params["train_ratio"],
                 input_shape=opt.net_params["input_shape"],
                 window=opt.data_params["window_lw"],
                 num_classes=num_classes)
-            dataset_test.data_start = 0
-            dataset_test.data_end = dataset_test.file_total
-            dataset_test.length = dataset_test.file_total
             test_loader = DataLoader(dataset_test, batch_size=args.batch_size,
                                      shuffle=False, collate_fn=aug.collate_fn)
-            print(f"Using all {dataset_test.file_total} files from {args.data_root}")
+            print(f"Using {len(dataset_test)} files (split='{args.data_split}') from {args.data_root}")
         else:
             test_loader = fw.dataLoader_test
 
@@ -1690,17 +1690,14 @@ def main():
         if args.data_root is not None:
             dataset_test = aug.cubic_sequence_data(
                 dataset_root=args.data_root,
-                pattern='testing',
+                pattern=args.data_split,
                 train_ratio=opt.data_params["train_ratio"],
                 input_shape=opt.net_params["input_shape"],
                 window=opt.data_params["window_lw"],
                 num_classes=num_classes)
-            dataset_test.data_start = 0
-            dataset_test.data_end = dataset_test.file_total
-            dataset_test.length = dataset_test.file_total
             test_loader = DataLoader(dataset_test, batch_size=args.batch_size,
                                      shuffle=False, collate_fn=aug.collate_fn)
-            print(f"Using all {dataset_test.file_total} files from {args.data_root}")
+            print(f"Using {len(dataset_test)} files (split='{args.data_split}') from {args.data_root}")
         else:
             test_loader = fw.dataLoader_test
 
