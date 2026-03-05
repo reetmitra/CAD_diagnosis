@@ -553,8 +553,11 @@ def render_artery(artery_id, volume, labels, save_path,
         cs_row     = 3
 
     # ── Inner helper: draw a single model strip ─────────────────────────────
-    def _draw_strip(ax, od_out, n_cls, model_label, sten_pred_val):
-        """Render one longitudinal strip with GT bands and TP/FN/FP markers.
+    def _draw_strip(ax, od_out, n_cls, model_label, sten_pred_val, annotate=True):
+        """Render one longitudinal strip.
+
+        annotate=True  (comparison mode): GT bands, TP/FN/FP boxes, legend, title.
+        annotate=False (single-model):    CT image only — GT/Pred bars carry the info.
 
         Returns (tp_count, fn_count, fp_count, pred_intervals_out).
         pred_intervals_out is a list of (x0_norm, x1_norm) tuples for each
@@ -563,6 +566,24 @@ def render_artery(artery_id, volume, labels, save_path,
         # 1. Background CT image
         ax.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
                   vmin=0, vmax=1)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        tp_count = fn_count = fp_count = 0
+        pred_intervals_out = []
+
+        if od_out is not None:
+            tp_idx, fn_idx, fp_idx, pred_ivs, surv_q = match_predictions_to_gt(
+                od_out, segments, n_cls, D, iou_thresh=iou_threshold)
+            pred_intervals_out = pred_ivs
+            tp_count = len(tp_idx)
+            fn_count = len(fn_idx)
+            fp_count = len(fp_idx)
+
+        if not annotate:
+            return tp_count, fn_count, fp_count, pred_intervals_out
+
+        # ── Annotated mode (comparison strips) ─────────────────────────────
 
         # 2. GT bands
         for seg_start, seg_end, raw_lbl in segments:
@@ -570,22 +591,11 @@ def render_artery(artery_id, volume, labels, save_path,
             if colour is not None:
                 ax.axvspan(seg_start, seg_end, alpha=0.35, color=colour)
 
-        tp_count = fn_count = fp_count = 0
-        pred_intervals_out = []
-
-        # 3. TP / FN / FP markers (only when OD output available)
+        # 3. TP / FN / FP markers
         if od_out is not None:
-            tp_idx, fn_idx, fp_idx, pred_ivs, surv_q = match_predictions_to_gt(
-                od_out, segments, n_cls, D, iou_thresh=iou_threshold)
-            pred_intervals_out = pred_ivs
-
             pred_logits  = od_out['pred_logits']
             pred_probs   = F.softmax(pred_logits, dim=-1)
             pred_classes = pred_probs.argmax(dim=-1)
-
-            tp_count = len(tp_idx)
-            fn_count = len(fn_idx)
-            fp_count = len(fp_idx)
 
             # TP boxes — solid coloured border
             for pi in tp_idx:
@@ -595,10 +605,7 @@ def render_artery(artery_id, volume, labels, save_path,
                     continue
                 q   = surv_q[pi]
                 cls = pred_classes[q].item()
-                if n_cls == 6:
-                    sten_group = 1 if cls < 2 else 2
-                else:
-                    sten_group = 1
+                sten_group = 1 if (n_cls == 6 and cls < 2) else 2
                 colour = PRED_COLOURS[sten_group]
                 ax.axvspan(x0, x1, alpha=0.0, edgecolor=colour,
                            linewidth=2, fill=False)
@@ -619,9 +626,7 @@ def render_artery(artery_id, volume, labels, save_path,
             # FN segments — hatched overlay
             for si in fn_idx:
                 seg_start, seg_end, raw_lbl = segments[si]
-                colour = RAW_LABEL_COLOURS.get(raw_lbl, '#FF0000')
-                if colour is None:
-                    colour = '#FF0000'
+                colour = RAW_LABEL_COLOURS.get(raw_lbl, '#FF0000') or '#FF0000'
                 ax.axvspan(seg_start, seg_end, alpha=0.6, color=colour,
                            hatch='///', edgecolor='white', linewidth=0.5)
                 ax.text((seg_start + seg_end) / 2,
@@ -640,12 +645,10 @@ def render_artery(artery_id, volume, labels, save_path,
         ax.set_title(title_str, fontsize=9, loc='left')
 
         # 5. Legend
-        legend_patches = []
-        for raw_lbl, colour in RAW_LABEL_COLOURS.items():
-            if raw_lbl == 0 or colour is None:
-                continue
-            legend_patches.append(
-                mpatches.Patch(color=colour, alpha=0.6, label=f'Raw {raw_lbl}'))
+        legend_patches = [
+            mpatches.Patch(color=c, alpha=0.6, label=f'Raw {lbl}')
+            for lbl, c in RAW_LABEL_COLOURS.items() if lbl != 0 and c is not None
+        ]
         if legend_patches:
             ax.legend(handles=legend_patches, loc='upper right',
                       fontsize=7, ncol=len(legend_patches))
@@ -674,7 +677,8 @@ def render_artery(artery_id, volume, labels, save_path,
             spine.set_visible(False)
 
     # ── Draw strip(s) ──────────────────────────────────────────────────────
-    _, _, _, pred_ivs = _draw_strip(ax_long, od_outputs, num_classes, label1, stenosis_pred)
+    _, _, _, pred_ivs = _draw_strip(ax_long, od_outputs, num_classes, label1, stenosis_pred,
+                                    annotate=comparison_mode)
     if comparison_mode:
         _draw_strip(ax_long2, od_outputs2, num_classes2, label2, stenosis_pred2)
 
@@ -690,12 +694,17 @@ def render_artery(artery_id, volume, labels, save_path,
         _draw_label_bar(ax_pred_bar, pred_coverage, 'Pred')
 
     # ── Figure suptitle ────────────────────────────────────────────────────
-    if comparison_mode or od_outputs is not None:
+    if comparison_mode:
         fig.suptitle(f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}',
                      fontsize=11, fontweight='bold')
+    elif od_outputs is not None:
+        tick = '\u2713' if stenosis_pred == sten_gt else '\u2717'
+        fig.suptitle(
+            f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}'
+            f'   |   Pred: {STENOSIS_NAMES[stenosis_pred]} {tick}',
+            fontsize=11, fontweight='bold')
     else:
-        unique_labels = np.unique(labels[labels > 0]).tolist()
-        fig.suptitle(f'{artery_id}   |   GT labels: {unique_labels}',
+        fig.suptitle(f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}',
                      fontsize=11, fontweight='bold')
 
     # ── Pre-compute FN sets for cross-section border colouring ─────────────
