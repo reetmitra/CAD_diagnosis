@@ -273,6 +273,22 @@ def parse_args():
                         help='Stop after N samples (0 = unlimited)')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device: auto / cuda / cpu')
+    # Comparison mode (--checkpoint2)
+    parser.add_argument('--checkpoint2', type=str, default=None,
+                        help='Optional: second SC-Net checkpoint for comparison strip')
+    parser.add_argument('--model_pattern2', type=str, default='fine_tuning',
+                        choices=['pre_training', 'fine_tuning'],
+                        help='Model pattern for checkpoint2 (default: fine_tuning)')
+    parser.add_argument('--thresholds2', type=str, default=None,
+                        help='Calibration JSON for checkpoint2')
+    parser.add_argument('--use_constrained2', action='store_true',
+                        help='Use constrained_stenosis_thresholds from --thresholds2 JSON')
+    parser.add_argument('--label', type=str, default='Model A',
+                        help='Display label for model 1 strip (default: "Model A")')
+    parser.add_argument('--label2', type=str, default='Model B',
+                        help='Display label for model 2 strip (default: "Model B")')
+    parser.add_argument('--iou_threshold', type=float, default=0.3,
+                        help='1D IoU threshold for TP/FN/FP classification (default: 0.3)')
     return parser.parse_args()
 
 
