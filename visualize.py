@@ -549,7 +549,9 @@ def render_artery(artery_id, volume, labels, save_path,
     def _draw_strip(ax, od_out, n_cls, model_label, sten_pred_val):
         """Render one longitudinal strip with GT bands and TP/FN/FP markers.
 
-        Returns (tp_count, fn_count, fp_count).
+        Returns (tp_count, fn_count, fp_count, pred_intervals_out).
+        pred_intervals_out is a list of (x0_norm, x1_norm) tuples for each
+        surviving predicted query (empty when od_out is None).
         """
         # 1. Background CT image
         ax.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
@@ -562,11 +564,13 @@ def render_artery(artery_id, volume, labels, save_path,
                 ax.axvspan(seg_start, seg_end, alpha=0.35, color=colour)
 
         tp_count = fn_count = fp_count = 0
+        pred_intervals_out = []
 
         # 3. TP / FN / FP markers (only when OD output available)
         if od_out is not None:
             tp_idx, fn_idx, fp_idx, pred_ivs, surv_q = match_predictions_to_gt(
                 od_out, segments, n_cls, D, iou_thresh=iou_threshold)
+            pred_intervals_out = pred_ivs
 
             pred_logits  = od_out['pred_logits']
             pred_probs   = F.softmax(pred_logits, dim=-1)
@@ -643,7 +647,7 @@ def render_artery(artery_id, volume, labels, save_path,
         ax.set_xlabel('Vessel axis position (slice index)', fontsize=8)
         ax.set_ylabel('Cross-section (px)', fontsize=8)
 
-        return tp_count, fn_count, fp_count
+        return tp_count, fn_count, fp_count, pred_intervals_out
 
     def _draw_label_bar(ax_bar, coverage_1d, label_text):
         """Render a thin 1×D horizontal label bar.
@@ -663,7 +667,7 @@ def render_artery(artery_id, volume, labels, save_path,
             spine.set_visible(False)
 
     # ── Draw strip(s) ──────────────────────────────────────────────────────
-    _draw_strip(ax_long, od_outputs, num_classes, label1, stenosis_pred)
+    _, _, _, pred_ivs = _draw_strip(ax_long, od_outputs, num_classes, label1, stenosis_pred)
     if comparison_mode:
         _draw_strip(ax_long2, od_outputs2, num_classes2, label2, stenosis_pred2)
 
@@ -671,8 +675,12 @@ def render_artery(artery_id, volume, labels, save_path,
     if not comparison_mode:
         gt_coverage = (labels > 0).astype(int)   # shape (D,)
         _draw_label_bar(ax_gt_bar, gt_coverage, 'GT')
-        # placeholder Pred bar — Task 2 will fill this with real predictions
-        _draw_label_bar(ax_pred_bar, np.zeros(D, dtype=int), 'Pred')
+        pred_coverage = np.zeros(D, dtype=int)
+        for x0_norm, x1_norm in pred_ivs:
+            start = max(0, int(x0_norm * D))
+            end   = min(D, int(x1_norm * D) + 1)
+            pred_coverage[start:end] = 1
+        _draw_label_bar(ax_pred_bar, pred_coverage, 'Pred')
 
     # ── Figure suptitle ────────────────────────────────────────────────────
     if comparison_mode or od_outputs is not None:
