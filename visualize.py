@@ -253,10 +253,12 @@ def main():
                       plaque_pred=plaque_pred,
                       od_outputs=od_outputs,
                       num_classes=num_classes)
-        print(f"  Saved: {filename}")
+        print(f"  [{saved + 1}/{len(pairs)}] {filename}")
         saved += 1
 
-    print(f"Done: {saved} PNGs saved to '{args.output_dir}'.")
+    print(f"\nDone. Saved {saved} PNGs to '{args.output_dir}'.")
+    if model is not None and args.filter in ('correct', 'incorrect'):
+        print(f"  Filter '{args.filter}' was active — totals reflect filtered count only.")
 
 
 def get_file_pairs(data_root, pattern):
