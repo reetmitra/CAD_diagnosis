@@ -1559,59 +1559,103 @@ Temperature `τ` controls smoothness: `τ=1` is standard softmax, `τ>1` produce
 
 ---
 
-## Phase 8 — CPR Visualization & Before/After Pipeline Analysis (2026-03-05)
+## Phase 8 — CPR Visualization Tool (2026-03-05)
 
-**Commits:** `1b37796` scaffold → `3da1343` data loading → `9c58f44` GT rendering → `75e514f` model inference → `97965c3` prediction overlay → `0c4500c` fix sten_group → `436a391` polish → comparison mode commits
+**Commits:** `1b37796` scaffold → `3da1343` data loading → `9c58f44` GT rendering → `75e514f` model inference → `97965c3` prediction overlay → `7b12e07` GT/Pred label bars → `cf2f937` Pred bar from intervals → `abac86d` clean single-model strip
 
 ### Motivation
 
-With v7-ft achieving Stenosis ACC=0.580 and AUC=0.713 (constrained calibration), the next step was to directly inspect what the model sees in the CPR images — and to make the improvement from fine-tuning visible at the artery level.
+With v7-ft achieving Stenosis ACC=0.580 and AUC=0.713 (constrained calibration), the next step was to directly inspect what the model sees in CPR images — making GT vs predicted coverage visible at per-slice resolution.
 
 ### `visualize.py` Tool
 
-A standalone batch script (`visualize.py`) that renders one PNG per artery, showing:
+A standalone batch script that renders one PNG per artery with a clean, readable layout:
 
-- **Longitudinal CPR strip**: grayscale `volume[:, 32, :].T` with the vessel axis as the x-axis (256 positions)
-- **GT label bands**: semi-transparent coloured `axvspan` overlays per contiguous label segment (raw labels 1–6, gold through dark-red)
-- **Model predictions**: TP (solid border box), FN (diagonal hatch on GT band), FP (dashed orange box) — computed via 1D IoU matching between predicted boxes and GT segments (threshold default 0.3)
-- **Cross-section panels** (up to 4): 64×64 axial slices at the centre of each GT segment; border colour encodes TP/FN state
-
-**Usage — GT only:**
-```bash
-python visualize.py --data_root ./dataset/test --pattern testing --output_dir ./viz_gt
+```
+┌─────────────────────────────────────────────────────┐
+│ {artery_id}  |  GT: Non-significant  |  Pred: Sig ✗ │  ← suptitle
+├─────────────────────────────────────────────────────┤
+│ Row 0: Longitudinal CT strip (greyscale, vessel axis x)│
+├─────────────────────────────────────────────────────┤
+│ Row 1 (GT bar):   ████░░░░████████░░░░░░░░          │  ← black=normal, red=lesion
+├─────────────────────────────────────────────────────┤
+│ Row 2 (Pred bar): ░░░░████████░░░░░░░░░░░          │  ← black=no pred, red=pred fires
+├──────┬──────┬──────┬──────────────────────────────  │
+│ CS 1 │ CS 2 │ CS 3 │  ← 64×64 cross-sections at     │
+│      │      │      │     labelled segment centres     │
+└──────┴──────┴──────┴───────────────────────────────-┘
 ```
 
-**Usage — Before/After comparison:**
+**GT bar** and **Pred bar** are thin 1D colour strips spanning the vessel axis (256 slices):
+- **Black** = normal (GT label 0 / no prediction)
+- **Red** = abnormal (GT label > 0 / any predicted box covers this slice)
+
+Discrepancies between the two bars immediately reveal where the model over- or under-predicts disease.
+
+**Usage (single-model, recommended):**
+```bash
+python visualize.py \
+  --data_root ./dataset/test --pattern testing \
+  --checkpoint checkpoints_v7_finetune/final_model.pth \
+  --thresholds calibration_thresholds_v7_constrained.json --use_constrained \
+  --output_dir ./viz_v7ft_clean
+```
+
+Output: `{artery_id}__sten_{GT}_pred_{Pred}_{CORRECT|WRONG}.png`
+
+**Optional — Before/After comparison mode** (two stacked strips with TP/FN/FP annotations):
 ```bash
 python visualize.py \
   --data_root ./dataset/test --pattern testing \
   --checkpoint  checkpoints_v6/best_model.pth --model_pattern pre_training \
   --label "Pre-trained (v6)" \
-  --checkpoint2 checkpoints_v7_finetune/final_model.pth --model_pattern2 fine_tuning \
+  --checkpoint2 checkpoints_v7_finetune/final_model.pth \
   --thresholds2 calibration_thresholds_v7_constrained.json --use_constrained2 \
   --label2 "Fine-tuned v7 (constrained)" \
   --output_dir ./viz_comparison
 ```
 
-In comparison mode, the figure shows two stacked longitudinal strips — one per model — with TP/FP/FN markers overlaid on each, so the improvement from fine-tuning is immediately visible at the detection level.
-
-### Key Finding: Full Pipeline Improvement
-
-The comparison mode directly visualises what fine-tuning achieves:
-
-| Model | Stenosis ACC | Non-sig Rec | Sig Rec | F1 |
-|-------|-------------|-------------|---------|-----|
-| Pre-trained only (v6) | ~0.40 | 0.00 | ~0.70 | ~0.35 |
-| Fine-tuned v7 (constrained) | **0.580** | **0.581** | **0.595** | **0.585** |
-
-The pre-trained model fires on the spatial branch (object queries) but lacks the lesion-type discrimination learned during fine-tuning. In the comparison PNGs, the pre-trained strip shows predominantly FN on Non-sig segments and FP detections without GT support, while the fine-tuned strip correctly matches GT segments with TP boxes.
-
-Cross-section panel borders encode the improvement:
-- **Green** border: TP in fine-tuned model (improvement achieved)
-- **Orange** border: FN in pre-trained, TP in fine-tuned (fine-tuning fixed this)
-- **Red** border: FN in both models (remaining hard cases)
-
 ### Design Documents
 
-- `docs/plans/2026-03-05-cpr-visualization-design.md` — single-model visualization design
 - `docs/plans/2026-03-05-comparison-visualization-design.md` — before/after comparison design
+- `docs/plans/2026-03-05-gt-pred-label-bars-plan.md` — GT/Pred label bar implementation plan
+
+---
+
+## Phase 9 — Failure Analysis from Visualization (2026-03-05)
+
+### Per-Class Accuracy on 67 Test Arteries (v7-ft, constrained calibration)
+
+| GT Class | Count | Correct | Accuracy | Main error |
+|----------|-------|---------|----------|-----------|
+| Healthy  | 17    | 1       | 6%       | 16/17 predicted Non-significant |
+| Non-sig  | 23    | 13      | 57%      | 9 predicted Sig, 1 Healthy |
+| Sig      | 27    | 11      | 41%      | 16/27 predicted Non-significant |
+
+### Root Causes
+
+**Healthy recall failure (6%):** The constrained calibration threshold for Non-significant was lowered to `t_NonSig = 0.35` to achieve Non-sig recall of 58.1%. This pulls in borderline-healthy vessels — the model fires low-confidence predictions on healthy arteries that satisfy the lowered threshold. The Healthy threshold (`t_Healthy = 2.20`) is very high, making it hard to predict Healthy. This is a calibration trade-off: fixing Non-sig recall costs Healthy precision.
+
+**Sig under-grading (41% recall):** The model detects that a lesion is present (Pred bar fires red at the correct slice) but grades it as Non-significant rather than Significant. This is a severity discrimination failure — the model finds the where but not the how severe. Visible in the PNGs as correct Pred bar coverage but wrong artery-level label.
+
+### GT/Pred Bar Patterns Observed
+
+Reading the visualizations:
+- **Red GT, black Pred** = model missed a lesion (FN at segment level)
+- **Black GT, red Pred** = model hallucinated disease on a healthy vessel (dominant Healthy failure)
+- **Red in both, same extent** = correct detection
+- **Red in both, different extent** = correct class, wrong localisation
+
+### Planned Fix: v9 Pre-Training
+
+v6's backbone converged very early (validation loss plateau at epoch 8 of 57), limiting the feature quality fed to the classification head. v9 pre-training was launched with stronger settings:
+
+```bash
+torchrun --nproc_per_node=2 train.py --distributed --pattern pre_training \
+  --data_root ./dataset/train --checkpoint_dir ./checkpoints_v9 \
+  --epochs 200 --lr 1e-4 --warmup_epochs 15 --patience 40 --save_every 5 \
+  --layerwise_lr --amp --ema --ema_decay 0.999 --augment \
+  --log_dir ./runs_v9
+```
+
+Key differences from v6: `warmup_epochs` 5→15, `patience` 20→40, `save_every` 10→5, `epochs` 57→200. Goal: richer backbone representation before fine-tuning, which should improve Healthy/Sig discrimination.
