@@ -299,10 +299,12 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     device = get_device(args.device)
+
+    # ── Model 1 ────────────────────────────────────────────────────────────
     model = None
     num_classes = 6 if args.model_pattern == 'fine_tuning' else 3
     if args.checkpoint:
-        print(f"Loading model from {args.checkpoint}...")
+        print(f"Loading model 1 from {args.checkpoint}...")
         model = _load_model_from_checkpoint(
             args.checkpoint, args.model_pattern, device, args.data_root)
         model.eval()
@@ -313,8 +315,25 @@ def main():
     if plaque_t:
         print(f"  Plaque thresholds:   {plaque_t}")
 
+    # ── Model 2 (comparison mode) ───────────────────────────────────────────
+    model2 = None
+    num_classes2 = 6 if args.model_pattern2 == 'fine_tuning' else 3
+    stenosis_t2 = plaque_t2 = None
+    if args.checkpoint2:
+        print(f"Loading model 2 from {args.checkpoint2}...")
+        model2 = _load_model_from_checkpoint(
+            args.checkpoint2, args.model_pattern2, device, args.data_root)
+        model2.eval()
+        stenosis_t2, plaque_t2 = load_thresholds(args.thresholds2, args.use_constrained2)
+        if stenosis_t2:
+            print(f"  Stenosis thresholds (m2): {stenosis_t2}")
+        if plaque_t2:
+            print(f"  Plaque thresholds   (m2): {plaque_t2}")
+
     pairs = get_file_pairs(args.data_root, args.pattern)
     print(f"Found {len(pairs)} arteries in split '{args.pattern}'")
+
+    comparison_mode = model2 is not None
 
     saved = 0
     for vol_path, lbl_path, artery_id in pairs:
@@ -328,9 +347,15 @@ def main():
             stenosis_pred, plaque_pred, od_outputs = predict_artery(
                 model, vol, device, num_classes, stenosis_t, plaque_t)
 
+        stenosis_pred2, plaque_pred2 = None, None
+        od_outputs2 = None
+        if model2 is not None:
+            stenosis_pred2, plaque_pred2, od_outputs2 = predict_artery(
+                model2, vol, device, num_classes2, stenosis_t2, plaque_t2)
+
         sten_gt = _sten_gt_from_labels(labels)
 
-        # Apply filter
+        # Apply filter (based on model 1 predictions)
         if args.filter == 'correct':
             if stenosis_pred is None or stenosis_pred != sten_gt:
                 continue
@@ -348,8 +373,15 @@ def main():
                 continue
 
         sten_tag = ['Healthy', 'NonSig', 'Sig'][sten_gt]
-        if stenosis_pred is not None:
-            pred_tag = ['Healthy', 'NonSig', 'Sig'][stenosis_pred]
+
+        # Build filename — include both model tags in comparison mode
+        if comparison_mode:
+            m1_tag = ['Healthy', 'NonSig', 'Sig'][stenosis_pred] if stenosis_pred is not None else 'NA'
+            m2_tag = ['Healthy', 'NonSig', 'Sig'][stenosis_pred2] if stenosis_pred2 is not None else 'NA'
+            filename = (f'{artery_id}__sten_{sten_tag}'
+                        f'_m1_{m1_tag}_m2_{m2_tag}.png')
+        elif stenosis_pred is not None:
+            pred_tag   = ['Healthy', 'NonSig', 'Sig'][stenosis_pred]
             correct_tag = 'CORRECT' if stenosis_pred == sten_gt else 'WRONG'
             filename = f'{artery_id}__sten_{sten_tag}_pred_{pred_tag}_{correct_tag}.png'
         else:
@@ -360,7 +392,14 @@ def main():
                       stenosis_pred=stenosis_pred,
                       plaque_pred=plaque_pred,
                       od_outputs=od_outputs,
-                      num_classes=num_classes)
+                      num_classes=num_classes,
+                      stenosis_pred2=stenosis_pred2,
+                      plaque_pred2=plaque_pred2,
+                      od_outputs2=od_outputs2,
+                      num_classes2=num_classes2,
+                      label1=args.label,
+                      label2=args.label2,
+                      iou_threshold=args.iou_threshold)
         print(f"  [{saved + 1}/{len(pairs)}] {filename}")
         saved += 1
 
@@ -422,20 +461,43 @@ def load_volume_and_labels(vol_path, lbl_path):
 
 def render_artery(artery_id, volume, labels, save_path,
                   stenosis_pred=None, plaque_pred=None, od_outputs=None,
-                  num_classes=6):
-    """Render longitudinal CPR strip with GT label bands and optional prediction overlays.
+                  num_classes=6,
+                  stenosis_pred2=None, plaque_pred2=None, od_outputs2=None,
+                  num_classes2=6,
+                  label1='Model A', label2='Model B',
+                  iou_threshold=0.3):
+    """Render longitudinal CPR strip(s) with GT label bands, TP/FN/FP markers,
+    and coloured cross-section borders.
+
+    Single-strip mode (od_outputs2 is None):
+        One model strip + cross-section panels with white borders.
+
+    Comparison mode (od_outputs2 is not None):
+        Two stacked model strips + cross-section panels with coloured borders:
+            green  = TP in model 2
+            orange = FN for model 1 but TP for model 2
+            red    = FN in both models
+            white  = no GT
 
     Args:
-        artery_id:     str, used in title
-        volume:        np.ndarray (256, 64, 64), raw HU
-        labels:        np.ndarray (256,), int32 raw labels
-        save_path:     str, output PNG path
-        stenosis_pred: int 0-2 or None (artery-level stenosis prediction)
-        plaque_pred:   int 0-2/-1 or None
-        od_outputs:    dict with 'pred_logits' [Q,C+1] and 'pred_boxes' [Q,2], or None
-        num_classes:   int, 3 or 6
+        artery_id:      str, used in title
+        volume:         np.ndarray (256, 64, 64), raw HU
+        labels:         np.ndarray (256,), int32 raw labels
+        save_path:      str, output PNG path
+        stenosis_pred:  int 0-2 or None (model 1 artery-level stenosis prediction)
+        plaque_pred:    int 0-2/-1 or None (model 1)
+        od_outputs:     dict with 'pred_logits' [Q,C+1] and 'pred_boxes' [Q,2], or None
+        num_classes:    int 3 or 6 (model 1)
+        stenosis_pred2: int 0-2 or None (model 2)
+        plaque_pred2:   int 0-2/-1 or None (model 2)
+        od_outputs2:    dict like od_outputs, or None; triggers comparison mode when set
+        num_classes2:   int 3 or 6 (model 2)
+        label1:         display label for model 1 strip
+        label2:         display label for model 2 strip
+        iou_threshold:  1D IoU cutoff for TP/FN/FP classification
     """
     segments = decode_label_segments(labels)
+    sten_gt  = _sten_gt_from_labels(labels)
 
     # ── Longitudinal strip: centre cross-section row across all z ──────────
     strip = volume[:, 32, :].T   # (64, 256) — x=vessel axis
@@ -446,93 +508,192 @@ def render_artery(artery_id, volume, labels, save_path,
     cs_positions = cs_positions[:4]
     n_cs = max(len(cs_positions), 1)
 
+    D = volume.shape[0]   # vessel axis length, typically 256
+
+    comparison_mode = od_outputs2 is not None
+
     # ── Figure layout ──────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(max(14, n_cs * 4), 7))
-    gs = fig.add_gridspec(2, n_cs, height_ratios=[3, 2], hspace=0.4, wspace=0.3)
-
-    ax_long = fig.add_subplot(gs[0, :])
-    ax_long.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
-                   vmin=0, vmax=1)
-
-    # ── GT label bands ─────────────────────────────────────────────────────
-    for seg_start, seg_end, raw_lbl in segments:
-        colour = RAW_LABEL_COLOURS.get(raw_lbl)
-        if colour is not None:
-            ax_long.axvspan(seg_start, seg_end, alpha=0.35, color=colour,
-                            label=f'Raw {raw_lbl}')
-
-    # ── Predicted bounding boxes (dashed) ──────────────────────────────────
-    if od_outputs is not None:
-        pred_logits = od_outputs['pred_logits']   # [Q, C+1]
-        pred_boxes  = od_outputs['pred_boxes']    # [Q, 2]  (center, width in [0,1])
-        pred_probs  = F.softmax(pred_logits, dim=-1)
-        pred_classes = pred_probs.argmax(dim=-1)  # [Q]
-        D = volume.shape[0]  # 256
-
-        for q in range(pred_classes.shape[0]):
-            cls = pred_classes[q].item()
-            if cls >= num_classes:   # no-object query
-                continue
-            prob = pred_probs[q, cls].item()
-            if prob < 0.15:          # low-confidence: skip
-                continue
-            cx_norm = pred_boxes[q, 0].item()
-            w_norm  = pred_boxes[q, 1].item()
-            x_left  = (cx_norm - w_norm / 2) * D
-            x_right = (cx_norm + w_norm / 2) * D
-
-            # Map class index to stenosis group for colour
-            if num_classes == 6:
-                sten_group = 1 if cls < 2 else 2  # 0,1 → Non-sig; 2-5 → Sig
-            else:
-                sten_group = 1
-            colour = PRED_COLOURS.get(sten_group, '#FFFFFF')
-
-            ax_long.axvline(x_left,  linestyle='--', color=colour,
-                            alpha=0.8, linewidth=1.5)
-            ax_long.axvline(x_right, linestyle='--', color=colour,
-                            alpha=0.8, linewidth=1.5)
-            ax_long.text((x_left + x_right) / 2, 3,
-                         f'P{cls}', color=colour, fontsize=7,
-                         ha='center', va='top')
-
-    # ── Title ──────────────────────────────────────────────────────────────
-    if stenosis_pred is not None:
-        sten_gt  = _sten_gt_from_labels(labels)
-        correct_str = '\u2713' if stenosis_pred == sten_gt else '\u2717'
-        ax_long.set_title(
-            f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}   '
-            f'Pred: {STENOSIS_NAMES[stenosis_pred]}  {correct_str}')
+    if comparison_mode:
+        fig = plt.figure(figsize=(max(14, n_cs * 4), 10))
+        gs  = fig.add_gridspec(3, n_cs, height_ratios=[3, 3, 2],
+                               hspace=0.5, wspace=0.3)
+        ax_long  = fig.add_subplot(gs[0, :])
+        ax_long2 = fig.add_subplot(gs[1, :])
+        cs_row   = 2
     else:
-        ax_long.set_title(
-            f'{artery_id}   |   GT labels: {np.unique(labels[labels>0]).tolist()}')
+        fig = plt.figure(figsize=(max(14, n_cs * 4), 7))
+        gs  = fig.add_gridspec(2, n_cs, height_ratios=[3, 2],
+                               hspace=0.4, wspace=0.3)
+        ax_long  = fig.add_subplot(gs[0, :])
+        ax_long2 = None
+        cs_row   = 1
 
-    ax_long.set_xlabel('Vessel axis position (slice index)')
-    ax_long.set_ylabel('Cross-section (px)')
+    # ── Inner helper: draw a single model strip ─────────────────────────────
+    def _draw_strip(ax, od_out, n_cls, model_label, sten_pred_val):
+        """Render one longitudinal strip with GT bands and TP/FN/FP markers.
+
+        Returns (tp_count, fn_count, fp_count).
+        """
+        # 1. Background CT image
+        ax.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
+                  vmin=0, vmax=1)
+
+        # 2. GT bands
+        for seg_start, seg_end, raw_lbl in segments:
+            colour = RAW_LABEL_COLOURS.get(raw_lbl)
+            if colour is not None:
+                ax.axvspan(seg_start, seg_end, alpha=0.35, color=colour)
+
+        tp_count = fn_count = fp_count = 0
+
+        # 3. TP / FN / FP markers (only when OD output available)
+        if od_out is not None:
+            tp_idx, fn_idx, fp_idx, pred_ivs, surv_q = match_predictions_to_gt(
+                od_out, segments, n_cls, D, iou_thresh=iou_threshold)
+
+            pred_logits  = od_out['pred_logits']
+            pred_probs   = F.softmax(pred_logits, dim=-1)
+            pred_classes = pred_probs.argmax(dim=-1)
+
+            tp_count = len(tp_idx)
+            fn_count = len(fn_idx)
+            fp_count = len(fp_idx)
+
+            # TP boxes — solid coloured border
+            for pi in tp_idx:
+                x0 = pred_ivs[pi][0] * D
+                x1 = pred_ivs[pi][1] * D
+                if x1 - x0 < 1.0:
+                    continue
+                q   = surv_q[pi]
+                cls = pred_classes[q].item()
+                if n_cls == 6:
+                    sten_group = 1 if cls < 2 else 2
+                else:
+                    sten_group = 1
+                colour = PRED_COLOURS[sten_group]
+                ax.axvspan(x0, x1, alpha=0.0, edgecolor=colour,
+                           linewidth=2, fill=False)
+                ax.text((x0 + x1) / 2, 1, 'TP', color=colour,
+                        fontsize=7, ha='center', va='top', fontweight='bold')
+
+            # FP boxes — dashed orange border
+            for pi in fp_idx:
+                x0 = pred_ivs[pi][0] * D
+                x1 = pred_ivs[pi][1] * D
+                if x1 - x0 < 1.0:
+                    continue
+                ax.axvspan(x0, x1, alpha=0.0, edgecolor='orange',
+                           linewidth=1.5, linestyle='--', fill=False)
+                ax.text((x0 + x1) / 2, 1, 'FP', color='orange',
+                        fontsize=7, ha='center', va='top')
+
+            # FN segments — hatched overlay
+            for si in fn_idx:
+                seg_start, seg_end, raw_lbl = segments[si]
+                colour = RAW_LABEL_COLOURS.get(raw_lbl, '#FF0000')
+                if colour is None:
+                    colour = '#FF0000'
+                ax.axvspan(seg_start, seg_end, alpha=0.6, color=colour,
+                           hatch='///', edgecolor='white', linewidth=0.5)
+                ax.text((seg_start + seg_end) / 2,
+                        strip_norm.shape[0] - 2,
+                        'FN', color='white', fontsize=7,
+                        ha='center', va='bottom', fontweight='bold')
+
+        # 4. Strip title
+        if sten_pred_val is not None:
+            tick = '\u2713' if sten_pred_val == sten_gt else '\u2717'
+            title_str = (f'{model_label}  |  '
+                         f'Pred: {STENOSIS_NAMES[sten_pred_val]} {tick}  |  '
+                         f'TP:{tp_count} FN:{fn_count} FP:{fp_count}')
+        else:
+            title_str = f'{model_label}  |  GT only'
+        ax.set_title(title_str, fontsize=9, loc='left')
+
+        # 5. Legend
+        legend_patches = []
+        for raw_lbl, colour in RAW_LABEL_COLOURS.items():
+            if raw_lbl == 0 or colour is None:
+                continue
+            legend_patches.append(
+                mpatches.Patch(color=colour, alpha=0.6, label=f'Raw {raw_lbl}'))
+        if legend_patches:
+            ax.legend(handles=legend_patches, loc='upper right',
+                      fontsize=7, ncol=len(legend_patches))
+
+        # 6. Axis labels
+        ax.set_xlabel('Vessel axis position (slice index)', fontsize=8)
+        ax.set_ylabel('Cross-section (px)', fontsize=8)
+
+        return tp_count, fn_count, fp_count
+
+    # ── Draw strip(s) ──────────────────────────────────────────────────────
+    _draw_strip(ax_long, od_outputs, num_classes, label1, stenosis_pred)
+    if comparison_mode:
+        _draw_strip(ax_long2, od_outputs2, num_classes2, label2, stenosis_pred2)
+
+    # ── Figure suptitle ────────────────────────────────────────────────────
+    if comparison_mode or od_outputs is not None:
+        fig.suptitle(f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}',
+                     fontsize=11, fontweight='bold')
+    else:
+        unique_labels = np.unique(labels[labels > 0]).tolist()
+        fig.suptitle(f'{artery_id}   |   GT labels: {unique_labels}',
+                     fontsize=11, fontweight='bold')
+
+    # ── Pre-compute FN sets for cross-section border colouring ─────────────
+    if comparison_mode and od_outputs is not None and od_outputs2 is not None:
+        _, fn_idx1, _, _, _ = match_predictions_to_gt(
+            od_outputs,  segments, num_classes,  D, iou_thresh=iou_threshold)
+        _, fn_idx2, _, _, _ = match_predictions_to_gt(
+            od_outputs2, segments, num_classes2, D, iou_thresh=iou_threshold)
+    else:
+        fn_idx1 = set()
+        fn_idx2 = set()
 
     # ── Cross-section panels ───────────────────────────────────────────────
     for col, (z_idx, raw_lbl) in enumerate(cs_positions):
-        ax_cs = fig.add_subplot(gs[1, col])
+        ax_cs = fig.add_subplot(gs[cs_row, col])
         cs_img = normalize_ct_data(volume[z_idx], hu_min=HU_MIN, hu_max=HU_MAX)
         ax_cs.imshow(cs_img, cmap='gray', vmin=0, vmax=1, origin='upper')
-        colour = RAW_LABEL_COLOURS.get(raw_lbl, 'white')
+
+        # Find which segment this cross-section belongs to
+        seg_idx = None
+        for si, (s, e, _) in enumerate(segments):
+            if s <= z_idx < e:
+                seg_idx = si
+                break
+
+        # Border colour
+        if seg_idx is None or raw_lbl == 0:
+            border_colour = 'white'
+        elif seg_idx not in fn_idx2:
+            # model 2 detected this segment (TP for model 2)
+            border_colour = 'green'
+        elif seg_idx in fn_idx1:
+            # both models missed it
+            border_colour = 'red'
+        else:
+            # model 1 detected it, model 2 missed it
+            border_colour = 'orange'
+
+        title_colour = RAW_LABEL_COLOURS.get(raw_lbl) or 'white'
         ax_cs.set_title(f'z={z_idx}  raw={raw_lbl}',
-                        color=colour or 'white', fontsize=9)
-        ax_cs.axis('off')
+                        color=title_colour, fontsize=9)
 
+        # Show coloured border without hiding axes via axis('off')
+        ax_cs.set_xticks([])
+        ax_cs.set_yticks([])
+        for spine in ax_cs.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor(border_colour)
+            spine.set_linewidth(3)
+
+    # Fill remaining columns with blank axes
     for col in range(len(cs_positions), n_cs):
-        fig.add_subplot(gs[1, col]).axis('off')
-
-    # ── Legend ─────────────────────────────────────────────────────────────
-    legend_patches = []
-    for raw_lbl, colour in RAW_LABEL_COLOURS.items():
-        if raw_lbl == 0 or colour is None:
-            continue
-        legend_patches.append(
-            mpatches.Patch(color=colour, alpha=0.6, label=f'Raw {raw_lbl}'))
-    if legend_patches:
-        ax_long.legend(handles=legend_patches, loc='upper right',
-                       fontsize=7, ncol=len(legend_patches))
+        ax_blank = fig.add_subplot(gs[cs_row, col])
+        ax_blank.axis('off')
 
     plt.savefig(save_path, bbox_inches='tight', dpi=100)
     plt.close(fig)
