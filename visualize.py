@@ -535,12 +535,15 @@ def render_artery(artery_id, volume, labels, save_path,
         ax_long2 = fig.add_subplot(gs[1, :])
         cs_row   = 2
     else:
-        fig = plt.figure(figsize=(max(14, n_cs * 4), 7))
-        gs  = fig.add_gridspec(2, n_cs, height_ratios=[3, 2],
+        fig = plt.figure(figsize=(max(14, n_cs * 4), 8))
+        gs  = fig.add_gridspec(4, n_cs,
+                               height_ratios=[3, 0.3, 0.3, 2],
                                hspace=0.4, wspace=0.3)
-        ax_long  = fig.add_subplot(gs[0, :])
-        ax_long2 = None
-        cs_row   = 1
+        ax_long    = fig.add_subplot(gs[0, :])
+        ax_gt_bar  = fig.add_subplot(gs[1, :])
+        ax_pred_bar = fig.add_subplot(gs[2, :])
+        ax_long2   = None
+        cs_row     = 3
 
     # ── Inner helper: draw a single model strip ─────────────────────────────
     def _draw_strip(ax, od_out, n_cls, model_label, sten_pred_val):
@@ -642,10 +645,34 @@ def render_artery(artery_id, volume, labels, save_path,
 
         return tp_count, fn_count, fp_count
 
+    def _draw_label_bar(ax_bar, coverage_1d, label_text):
+        """Render a thin 1×D horizontal label bar.
+
+        coverage_1d: np.ndarray shape (D,), int; 0=normal(black), 1=abnormal(red)
+        label_text:  short string shown on y-axis tick ('GT' or 'Pred')
+        """
+        import matplotlib.colors as mcolors
+        cmap = mcolors.ListedColormap(['black', 'red'])
+        bar  = coverage_1d.reshape(1, -1)   # shape (1, D)
+        ax_bar.imshow(bar, cmap=cmap, vmin=0, vmax=1,
+                      aspect='auto', origin='upper')
+        ax_bar.set_xticks([])
+        ax_bar.set_yticks([0])
+        ax_bar.set_yticklabels([label_text], fontsize=7)
+        for spine in ax_bar.spines.values():
+            spine.set_visible(False)
+
     # ── Draw strip(s) ──────────────────────────────────────────────────────
     _draw_strip(ax_long, od_outputs, num_classes, label1, stenosis_pred)
     if comparison_mode:
         _draw_strip(ax_long2, od_outputs2, num_classes2, label2, stenosis_pred2)
+
+    # ── Label bars (single-model mode only) ─────────────────────────────────
+    if not comparison_mode:
+        gt_coverage = (labels > 0).astype(int)   # shape (D,)
+        _draw_label_bar(ax_gt_bar, gt_coverage, 'GT')
+        # placeholder Pred bar — Task 2 will fill this with real predictions
+        _draw_label_bar(ax_pred_bar, np.zeros(D, dtype=int), 'Pred')
 
     # ── Figure suptitle ────────────────────────────────────────────────────
     if comparison_mode or od_outputs is not None:
