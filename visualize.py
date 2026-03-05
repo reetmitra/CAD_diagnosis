@@ -541,7 +541,7 @@ def render_artery(artery_id, volume, labels, save_path,
                                hspace=0.4, wspace=0.3)
         ax_long    = fig.add_subplot(gs[0, :])
         ax_gt_bar  = fig.add_subplot(gs[1, :])
-        ax_pred_bar = fig.add_subplot(gs[2, :])
+        ax_pred_bar  = fig.add_subplot(gs[2, :])
         ax_long2   = None
         cs_row     = 3
 
