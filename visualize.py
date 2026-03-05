@@ -69,6 +69,18 @@ HU_MIN = 300 - 900 / 2   # = -150
 HU_MAX = 300 + 900 / 2   # =  750
 
 
+# ─── Label helpers ────────────────────────────────────────────────────────────
+
+def _sten_gt_from_labels(labels):
+    """Derive artery-level stenosis GT (0/1/2) from raw label array."""
+    gt = labels[labels > 0]
+    if len(gt) == 0:
+        return 0   # Healthy
+    if np.any(gt >= 3):
+        return 2   # Significant
+    return 1       # Non-significant
+
+
 # ─── Model helpers ────────────────────────────────────────────────────────────
 
 def load_thresholds(thresholds_path, use_constrained):
@@ -208,18 +220,39 @@ def main():
             stenosis_pred, plaque_pred, od_outputs = predict_artery(
                 model, vol, device, num_classes, stenosis_t, plaque_t)
 
-        # Derive GT stenosis class for filename
-        gt_labels = labels[labels > 0]
-        if len(gt_labels) == 0:
-            sten_tag = 'Healthy'
-        elif np.any(gt_labels >= 3):
-            sten_tag = 'Sig'
-        else:
-            sten_tag = 'NonSig'
+        sten_gt = _sten_gt_from_labels(labels)
 
-        filename = f'{artery_id}__sten_{sten_tag}.png'
+        # Apply filter
+        if args.filter == 'correct':
+            if stenosis_pred is None or stenosis_pred != sten_gt:
+                continue
+        elif args.filter == 'incorrect':
+            if stenosis_pred is None or stenosis_pred == sten_gt:
+                continue
+        elif args.filter == 'healthy':
+            if sten_gt != 0:
+                continue
+        elif args.filter == 'nonsig':
+            if sten_gt != 1:
+                continue
+        elif args.filter == 'sig':
+            if sten_gt != 2:
+                continue
+
+        sten_tag = ['Healthy', 'NonSig', 'Sig'][sten_gt]
+        if stenosis_pred is not None:
+            pred_tag = ['Healthy', 'NonSig', 'Sig'][stenosis_pred]
+            correct_tag = 'CORRECT' if stenosis_pred == sten_gt else 'WRONG'
+            filename = f'{artery_id}__sten_{sten_tag}_pred_{pred_tag}_{correct_tag}.png'
+        else:
+            filename = f'{artery_id}__sten_{sten_tag}.png'
+
         save_path = os.path.join(args.output_dir, filename)
-        render_artery_gt_only(artery_id, vol, labels, save_path)
+        render_artery(artery_id, vol, labels, save_path,
+                      stenosis_pred=stenosis_pred,
+                      plaque_pred=plaque_pred,
+                      od_outputs=od_outputs,
+                      num_classes=num_classes)
         print(f"  Saved: {filename}")
         saved += 1
 
@@ -277,72 +310,119 @@ def load_volume_and_labels(vol_path, lbl_path):
     return vol, labels
 
 
-def render_artery_gt_only(artery_id, volume, labels, save_path):
-    """Render longitudinal CPR strip with GT label bands + cross-section panels.
+def render_artery(artery_id, volume, labels, save_path,
+                  stenosis_pred=None, plaque_pred=None, od_outputs=None,
+                  num_classes=6):
+    """Render longitudinal CPR strip with GT label bands and optional prediction overlays.
 
     Args:
-        artery_id:  str, used in title
-        volume:     np.ndarray (256, 64, 64), raw HU
-        labels:     np.ndarray (256,), int32 raw labels
-        save_path:  str, output PNG path
+        artery_id:     str, used in title
+        volume:        np.ndarray (256, 64, 64), raw HU
+        labels:        np.ndarray (256,), int32 raw labels
+        save_path:     str, output PNG path
+        stenosis_pred: int 0-2 or None (artery-level stenosis prediction)
+        plaque_pred:   int 0-2/-1 or None
+        od_outputs:    dict with 'pred_logits' [Q,C+1] and 'pred_boxes' [Q,2], or None
+        num_classes:   int, 3 or 6
     """
     segments = decode_label_segments(labels)
 
     # ── Longitudinal strip: centre cross-section row across all z ──────────
-    # volume[:, 32, :] → (256, 64), transpose → (64, 256) so x=vessel axis
-    strip = volume[:, 32, :].T   # shape (64, 256)
+    strip = volume[:, 32, :].T   # (64, 256) — x=vessel axis
     strip_norm = normalize_ct_data(strip, hu_min=HU_MIN, hu_max=HU_MAX)
 
     # ── Cross-section positions: centre of each labelled segment ───────────
     cs_positions = [((s + e) // 2, lbl) for s, e, lbl in segments]
-    cs_positions = cs_positions[:4]   # cap at 4 panels
+    cs_positions = cs_positions[:4]
     n_cs = max(len(cs_positions), 1)
 
     # ── Figure layout ──────────────────────────────────────────────────────
     fig = plt.figure(figsize=(max(14, n_cs * 4), 7))
     gs = fig.add_gridspec(2, n_cs, height_ratios=[3, 2], hspace=0.4, wspace=0.3)
 
-    # Row 0: longitudinal strip (spans all columns)
     ax_long = fig.add_subplot(gs[0, :])
     ax_long.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
                    vmin=0, vmax=1)
 
-    # GT label bands
+    # ── GT label bands ─────────────────────────────────────────────────────
     for seg_start, seg_end, raw_lbl in segments:
         colour = RAW_LABEL_COLOURS.get(raw_lbl)
         if colour is not None:
             ax_long.axvspan(seg_start, seg_end, alpha=0.35, color=colour,
                             label=f'Raw {raw_lbl}')
 
+    # ── Predicted bounding boxes (dashed) ──────────────────────────────────
+    if od_outputs is not None:
+        pred_logits = od_outputs['pred_logits']   # [Q, C+1]
+        pred_boxes  = od_outputs['pred_boxes']    # [Q, 2]  (center, width in [0,1])
+        pred_probs  = F.softmax(pred_logits, dim=-1)
+        pred_classes = pred_probs.argmax(dim=-1)  # [Q]
+        D = volume.shape[0]  # 256
+
+        for q in range(pred_classes.shape[0]):
+            cls = pred_classes[q].item()
+            if cls >= num_classes:   # no-object query
+                continue
+            prob = pred_probs[q, cls].item()
+            if prob < 0.15:          # low-confidence: skip
+                continue
+            cx_norm = pred_boxes[q, 0].item()
+            w_norm  = pred_boxes[q, 1].item()
+            x_left  = (cx_norm - w_norm / 2) * D
+            x_right = (cx_norm + w_norm / 2) * D
+
+            # Map class index to stenosis group for colour
+            if num_classes == 6:
+                sten_group = 0 if cls < 2 else 2  # 0,1 → Non-sig; 2-5 → Sig
+            else:
+                sten_group = 1
+            colour = PRED_COLOURS.get(sten_group, '#FFFFFF')
+
+            ax_long.axvline(x_left,  linestyle='--', color=colour,
+                            alpha=0.8, linewidth=1.5)
+            ax_long.axvline(x_right, linestyle='--', color=colour,
+                            alpha=0.8, linewidth=1.5)
+            ax_long.text((x_left + x_right) / 2, 3,
+                         f'P{cls}', color=colour, fontsize=7,
+                         ha='center', va='top')
+
+    # ── Title ──────────────────────────────────────────────────────────────
+    if stenosis_pred is not None:
+        sten_gt  = _sten_gt_from_labels(labels)
+        correct_str = '\u2713' if stenosis_pred == sten_gt else '\u2717'
+        ax_long.set_title(
+            f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}   '
+            f'Pred: {STENOSIS_NAMES[stenosis_pred]}  {correct_str}')
+    else:
+        ax_long.set_title(
+            f'{artery_id}   |   GT labels: {np.unique(labels[labels>0]).tolist()}')
+
     ax_long.set_xlabel('Vessel axis position (slice index)')
     ax_long.set_ylabel('Cross-section (px)')
-    ax_long.set_title(f'{artery_id}   |   GT labels: {np.unique(labels[labels>0]).tolist()}')
 
-    # Row 1: cross-section panels
+    # ── Cross-section panels ───────────────────────────────────────────────
     for col, (z_idx, raw_lbl) in enumerate(cs_positions):
         ax_cs = fig.add_subplot(gs[1, col])
         cs_img = normalize_ct_data(volume[z_idx], hu_min=HU_MIN, hu_max=HU_MAX)
         ax_cs.imshow(cs_img, cmap='gray', vmin=0, vmax=1, origin='upper')
         colour = RAW_LABEL_COLOURS.get(raw_lbl, 'white')
-        ax_cs.set_title(f'z={z_idx}  raw={raw_lbl}', color=colour or 'white',
-                        fontsize=9)
+        ax_cs.set_title(f'z={z_idx}  raw={raw_lbl}',
+                        color=colour or 'white', fontsize=9)
         ax_cs.axis('off')
 
-    # Fill unused cross-section columns with blank axes
     for col in range(len(cs_positions), n_cs):
-        ax_blank = fig.add_subplot(gs[1, col])
-        ax_blank.axis('off')
+        fig.add_subplot(gs[1, col]).axis('off')
 
-    # Legend
+    # ── Legend ─────────────────────────────────────────────────────────────
     legend_patches = []
     for raw_lbl, colour in RAW_LABEL_COLOURS.items():
         if raw_lbl == 0 or colour is None:
             continue
-        name = f'Raw {raw_lbl}'
-        legend_patches.append(mpatches.Patch(color=colour, alpha=0.6, label=name))
+        legend_patches.append(
+            mpatches.Patch(color=colour, alpha=0.6, label=f'Raw {raw_lbl}'))
     if legend_patches:
-        ax_long.legend(handles=legend_patches, loc='upper right', fontsize=7,
-                       ncol=len(legend_patches))
+        ax_long.legend(handles=legend_patches, loc='upper right',
+                       fontsize=7, ncol=len(legend_patches))
 
     plt.savefig(save_path, bbox_inches='tight', dpi=100)
     plt.close(fig)
