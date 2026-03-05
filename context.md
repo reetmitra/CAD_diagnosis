@@ -124,7 +124,7 @@ Train set: 2,961 samples (APNHC* patients) | Test set: 665 samples (AP-NUH* pati
 | v2-ft | 52 | **3e-6** | fine_tuning, pretrained from v2 epoch 139, single GPU (GPU 1) | **DONE** | Early stop ep52 (patience 30/30). Best val 5.05 (ep22). Majority class only — LR too low + bugs 6-8. |
 | v6-ft | 39 | **5e-6** | fine_tuning, pretrained from v6 ep8 (val 3.22), single GPU (GPU 0) | **DONE** | Early stopped ep39, best ep9 (val 4.1395). Calibrated: ACC 0.470, F1 0.417, Significant F1 0.621. |
 | v7-ft | 49 | **5e-6** | fine_tuning, from v6 backbone, DC hold=20/ramp=20, confidence=0.7, balanced_sampling, focal_gamma=2.0 | **DONE** | Early stopped ep49 (patience). Best val ep19 (DC=0 hold). final_model.pth (ep49) better for classification. |
-| v8-ft | – | **5e-6** | fine_tuning, from v6 backbone, all v7 settings + focal_gamma=3.0, patience=25, epochs=120, 2-GPU DDP | **RUNNING** | Launched 2026-03-02. Expect completion ~3-5 days. |
+| v8-ft | 45 | **5e-6** | fine_tuning, from v6 backbone, all v7 settings + focal_gamma=3.0, patience=25, epochs=120, 2-GPU DDP | **DONE** | Early stop ep45. Best val ep20 (DC=0 hold, val 3.5715). Peak stenosis F1=0.385 at ep29. focal_gamma=3.0 hurt SC branch (ACC 0.814→0.749). **WORSE than v7-ft.** |
 
 ### Current best checkpoints
 - `checkpoints_v2/checkpoint_epoch_139.pth` — best pre-training before bug fixes
@@ -404,33 +404,34 @@ The original paper code also silently skips loading layers with shape mismatches
 - Key: 2D search fixed t1=1.0, missing Non-sig sweet spot. 3D search finds t1=0.35.
 - Standard calibration still useful when Sig recall > 90% is clinically required.
 
-### Running: v8-ft (2026-03-02)
-- Identical to v7-ft but focal_gamma=3.0 (from 2.0), patience=25, epochs=120, 2-GPU DDP
-- Log: `train_v8_finetune.log`; checkpoints: `checkpoints_v8_finetune/`
-- After training: calibrate with `--constrain_nonsig_recall 0.10` on val; eval on held-out test
+### Completed: v8-ft (2026-03-05) — WORSE than v7-ft
+- focal_gamma=3.0 hurt the SC branch (0.814→0.749) — too aggressive on hard temporal examples
+- Best checkpoint: ep29 (DC_w=0.45, peak val stenosis F1=0.385)
+- Held-out test: Stenosis ACC=0.555, F1=0.555, AUC=0.680 (vs v7-ft: 0.580/0.585/0.713)
+- **v7-ft final_model.pth with calibration_thresholds_v7_constrained.json remains BEST**
+- Lesson: focal_gamma=2.0 is the sweet spot; going higher destabilizes SC branch
 
 ### Bug 19 status: ALREADY FIXED
 - Bug 19 (label offset in `_get_sampling_point_classification_targets`) was fixed in commit `e6bc34d`
   as part of v7 DC improvements — confidence gating + no-object filtering replaced the broken argmax-1 logic.
 
-### Reference: evaluation with constrained calibration
+### Next options for v9-ft
+1. **LR restart** — resume from v7-ft ep49 with fresh LR (warm restart), focal_gamma=2.0
+2. **Longer pre-training** — train v6 backbone further before fine-tuning
+3. **Ordinal loss** — add penalty for predicting Healthy when GT=Significant (or vice versa)
+4. **Better backbone** — improve pre-trained v6 before fine-tuning
+
+### Reference: evaluation with constrained calibration (v7-ft — current best)
 ```bash
 source .venv/bin/activate
 
-# 1. Calibrate on val split (3D constrained search, ~10 min)
-python calibrate.py --checkpoint ./checkpoints_v8_finetune/final_model.pth \
-    --pattern fine_tuning \
-    --output calibration_thresholds_v8_constrained.json \
-    --grid_steps 30 \
-    --constrain_nonsig_recall 0.10
-
-# 2. Evaluate on held-out test with constrained thresholds
-python eval.py --checkpoint ./checkpoints_v8_finetune/final_model.pth \
+# Evaluate on held-out test with constrained thresholds (v7-ft)
+python eval.py --checkpoint ./checkpoints_v7_finetune/final_model.pth \
     --pattern fine_tuning --data_root ./dataset/test \
-    --thresholds calibration_thresholds_v8_constrained.json \
+    --thresholds calibration_thresholds_v7_constrained.json \
     --use_constrained \
-    --detailed --plot --plot_dir ./plots_v8ft_constrained \
-    --save_results results_v8ft_constrained.json
+    --detailed --plot --plot_dir ./plots_v7ft_constrained \
+    --save_results results_v7ft_constrained.json
 ```
 
 ---
