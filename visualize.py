@@ -267,9 +267,9 @@ def parse_args():
         description='Visualize CPR images with ground truth and model predictions')
     parser.add_argument('--data_root', type=str, required=True,
                         help='Dataset root containing volumes/ and labels/')
-    parser.add_argument('--pattern', type=str, default='testing',
-                        choices=['training', 'validation', 'testing'],
-                        help='Dataset split to visualize (default: testing)')
+    parser.add_argument('--pattern', type=str, default='all',
+                        choices=['all', 'training', 'validation', 'testing'],
+                        help='Dataset split to visualize; "all" uses the full folder (default: all)')
     parser.add_argument('--output_dir', type=str, default='./viz',
                         help='Directory to save PNG files (default: ./viz)')
     parser.add_argument('--checkpoint', type=str, default=None,
@@ -442,7 +442,10 @@ def get_file_pairs(data_root, pattern):
     n = len(vol_files)
     train_ratio = 0.8
 
-    if pattern == 'training':
+    if pattern == 'all':
+        start = 0
+        end = n
+    elif pattern == 'training':
         start = 0
         end = int(n * train_ratio)
     elif pattern == 'validation':

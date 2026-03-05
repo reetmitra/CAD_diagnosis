@@ -153,6 +153,10 @@ class cubic_sequence_data(data.Dataset):
             self.data_start = 0
             self.data_end = 0
             self.length = len(file_indices)
+        elif pattern == 'all':
+            self.data_start = 0
+            self.data_end = self.file_total
+            self.length = self.data_end - self.data_start
         elif pattern == 'training':
             self.data_start = 0
             self.data_end = int(self.file_total * train_ratio)
