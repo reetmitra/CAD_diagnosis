@@ -36,21 +36,53 @@ class clinically_credible_augmentation(nn.Module):
         resized_label = zoom(label, label_zoom_factors, order=1)
         return {"cpr_volume": resized_data, "label": resized_label}
 
-    def data_generator(self, foreground_data, background_data):
+    def data_generator(self, foreground_data, background_data, blend_margin=3):
         foreground_data = self.data_resize(foreground_data)
         background_data = self.data_resize(background_data)
 
         f_data, f_label = foreground_data['cpr_volume'], foreground_data['label']
         b_data, b_label = background_data['cpr_volume'], background_data['label']
 
-        ret_data = np.full((256, 64, 64), -1024, dtype=np.int32)
+        ret_data = np.full((256, 64, 64), -1024, dtype=np.float64)
         ret_label = f_label
         b_indices = np.where(b_label == 0)[0]
         ret_data[b_indices, :, :] = b_data[b_indices, :, :]
         f_indices = np.where(f_label > 0)[0]
-        ret_data[f_indices, :, :] = f_data[f_indices, :, :]
+
+        # --- Intensity matching ---
+        # Match foreground slice intensity to background at the boundary
+        if len(f_indices) > 0 and len(b_indices) > 0:
+            # Compute background mean/std from nearby slices
+            b_mean = b_data[b_indices].mean()
+            b_std = max(b_data[b_indices].std(), 1e-6)
+            f_mean = f_data[f_indices].mean()
+            f_std = max(f_data[f_indices].std(), 1e-6)
+            # Normalize foreground to match background intensity distribution
+            f_matched = (f_data[f_indices] - f_mean) * (b_std / f_std) + b_mean
+            ret_data[f_indices, :, :] = f_matched
+        else:
+            ret_data[f_indices, :, :] = f_data[f_indices, :, :]
+
+        # --- Soft blending at boundaries ---
+        # Find transition points between foreground and background
+        if blend_margin > 0 and len(f_indices) > 0:
+            # Find contiguous foreground runs
+            f_set = set(f_indices.tolist())
+            for idx in f_indices:
+                for offset in range(1, blend_margin + 1):
+                    # Blend at the start of foreground (transition from background)
+                    prev_idx = idx - offset
+                    if prev_idx >= 0 and prev_idx not in f_set:
+                        alpha = 0.5 * (1 + np.cos(np.pi * offset / blend_margin))  # cosine blend
+                        ret_data[prev_idx] = (1 - alpha) * ret_data[prev_idx] + alpha * ret_data[idx]
+                    # Blend at the end of foreground
+                    next_idx = idx + offset
+                    if next_idx < 256 and next_idx not in f_set:
+                        alpha = 0.5 * (1 + np.cos(np.pi * offset / blend_margin))
+                        ret_data[next_idx] = (1 - alpha) * ret_data[next_idx] + alpha * ret_data[idx]
+
         ret_label = np.where(ret_label > 0, ((ret_label - 1) % 3) + 1, ret_label)
-        return {'cpr_volume': ret_data, 'label': ret_label}
+        return {'cpr_volume': ret_data.astype(np.int32), 'label': ret_label}
 
     def read_data(self, volumes_file, labels_file):
 
@@ -127,6 +159,35 @@ def online_augment(volume, labels):
     if random.random() < 0.5:
         volume = np.flip(volume, axis=0).copy()
         labels = np.flip(labels, axis=0).copy()
+
+    # Gaussian noise injection
+    if random.random() < 0.3:
+        noise_std = random.uniform(5, 25)  # HU-scale noise
+        noise = np.random.normal(0, noise_std, volume.shape).astype(volume.dtype)
+        volume = volume + noise
+
+    # Gaussian blur (simulate lower resolution / motion)
+    if random.random() < 0.2:
+        from scipy.ndimage import gaussian_filter
+        sigma = random.uniform(0.3, 1.0)
+        volume = gaussian_filter(volume, sigma=sigma)
+
+    # Intensity scaling (contrast adjustment)
+    if random.random() < 0.3:
+        scale = random.uniform(0.85, 1.15)
+        mean_val = volume.mean()
+        volume = (volume - mean_val) * scale + mean_val
+
+    # Random erasing (cutout) — mask a small random region to zero
+    if random.random() < 0.2:
+        D, H, W = volume.shape
+        erase_d = random.randint(D // 16, D // 4)
+        erase_h = random.randint(H // 4, H // 2)
+        erase_w = random.randint(W // 4, W // 2)
+        d0 = random.randint(0, max(D - erase_d, 1))
+        h0 = random.randint(0, max(H - erase_h, 1))
+        w0 = random.randint(0, max(W - erase_w, 1))
+        volume[d0:d0+erase_d, h0:h0+erase_h, w0:w0+erase_w] = 0
 
     return volume, labels
 

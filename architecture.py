@@ -132,6 +132,10 @@ class temporal_semantic_learning(nn.Module):
         self.flattening_projection = temporal_flattening_projection(in_channels=feature_channels[0],
                                                                     out_channels=feature_channels[1],
                                                                     embedding_dim=embedding_dim)
+        # Learnable positional encoding for proximal→distal vessel ordering
+        self.pos_embedding = nn.Parameter(torch.zeros(1, num_cubes, embedding_dim[1]))
+        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
+
         self.temporal_correlation_analysis = temporal_correlation_analysis(embedding_dim=embedding_dim[1],
                                                                            head_num=transfromer_param[0],
                                                                            encoder_num=transfromer_param[1])
@@ -142,6 +146,8 @@ class temporal_semantic_learning(nn.Module):
         x = funcs._3d_cubes_selection(img, cube_size=self.cube_size, num_cubes=self.num_cubes, step=self.cubes_step, batch_size=b)
         x = self._3dcnn(x)
         x = self.flattening_projection(x)
+        # Add positional encoding: x is (B, L, D)
+        x = x + self.pos_embedding[:, :x.shape[1], :]
         x = self.temporal_correlation_analysis(x)
         x = self.softmax_classify(x, self.pattern)
         return x

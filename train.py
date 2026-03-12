@@ -18,11 +18,13 @@ Example:
 
 import os
 import sys
+import random
 import argparse
 import time
 import copy
 from datetime import datetime
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -112,6 +114,17 @@ def parse_args(argv=None):
     parser.add_argument('--min_delta', type=float, default=0.0,
                         help='Minimum val loss improvement for early stopping')
 
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducibility (default: None = non-deterministic)')
+    parser.add_argument('--eos_coef', type=float, default=None,
+                        help='No-object class weight for detection loss (default: use config value 0.2)')
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='Number of DataLoader worker processes (default: 0)')
+    parser.add_argument('--patient_split', action='store_true', default=False,
+                        help='Use patient-level splitting to prevent data leakage')
+    parser.add_argument('--split_seed', type=int, default=42,
+                        help='Random seed for patient-level split (default: 42)')
+
     parser.add_argument('--augment', action='store_true',
                         help='Enable data augmentation for the training set')
 
@@ -135,6 +148,10 @@ def parse_args(argv=None):
                              'after the hold period (default: 0)')
     parser.add_argument('--dc_confidence_threshold', type=float, default=0.0,
                         help='Min softmax confidence for Ldc pseudo-labels (default: 0.0 = no gating)')
+    parser.add_argument('--soft_dc', action='store_true', default=False,
+                        help='Use soft probability pseudo-labels for Ldc (KL-div instead of hard CE)')
+    parser.add_argument('--label_smoothing', type=float, default=0.0,
+                        help='Label smoothing epsilon for SC classification loss (default: 0.0)')
     parser.add_argument('--balanced_sampling', action='store_true',
                         help='Use class-balanced batch sampling (WeightedRandomSampler)')
 
@@ -199,6 +216,15 @@ class Trainer:
 
     def __init__(self, args):
         self.args = args
+
+        # ---- seed setup ----
+        if args.seed is not None:
+            random.seed(args.seed)
+            np.random.seed(args.seed)
+            torch.manual_seed(args.seed)
+            torch.cuda.manual_seed_all(args.seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
         # ---- distributed setup ----
         self.distributed = args.distributed
@@ -277,6 +303,11 @@ class Trainer:
             use_focal=self.args.focal_loss,
             focal_gamma=self.args.focal_gamma,
             dc_confidence_threshold=self.args.dc_confidence_threshold,
+            eos_coef=self.args.eos_coef,
+            label_smoothing=self.args.label_smoothing,
+            use_soft_dc=self.args.soft_dc,
+            patient_split=self.args.patient_split,
+            split_seed=self.args.split_seed,
             temporal_encoder_layers=getattr(self.args, 'temporal_encoder_layers', None),
             temporal_heads=getattr(self.args, 'temporal_heads', None),
             spatial_encoder_layers=getattr(self.args, 'spatial_encoder_layers', None),
@@ -312,6 +343,7 @@ class Trainer:
                 window=fw.window_lw,
                 augment=True,
                 num_classes=self.num_classes,
+                file_indices=fw.train_indices,
             )
         else:
             train_dataset = fw.dataLoader_train.dataset
@@ -341,15 +373,20 @@ class Trainer:
                 sample_weights, num_samples=len(train_dataset), replacement=True)
             shuffle_train = False  # sampler handles ordering
 
+        pin = (self.device.type == 'cuda')
+        nw = self.args.num_workers
+
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size,
             shuffle=shuffle_train, sampler=self.train_sampler,
             collate_fn=aug.collate_fn,
+            num_workers=nw, pin_memory=pin,
         )
         self.eval_loader = DataLoader(
             eval_dataset, batch_size=batch_size,
             shuffle=False, sampler=eval_sampler,
             collate_fn=aug.collate_fn,
+            num_workers=nw, pin_memory=pin,
         )
 
     def _compute_sample_weights(self, dataset):
@@ -854,6 +891,14 @@ class Trainer:
         if getattr(self.args, 'spatial_decoder_layers', None) is not None:
             print(f"  Spatial dec layers:  {self.args.spatial_decoder_layers}")
         print(f"  Parameters:       {total_params:,} total, {trainable_params:,} trainable")
+        if self.args.seed is not None:
+            print(f"  Seed:             {self.args.seed}")
+        if self.args.eos_coef is not None:
+            print(f"  eos_coef:         {self.args.eos_coef}")
+        if self.args.num_workers > 0:
+            print(f"  Num workers:      {self.args.num_workers}")
+        if self.args.patient_split:
+            print(f"  Patient split:    True (seed={self.args.split_seed})")
         if self.writer is not None:
             print(f"  TensorBoard:      {self.writer.log_dir}")
         print("=" * 60)

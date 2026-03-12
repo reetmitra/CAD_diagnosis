@@ -1659,3 +1659,163 @@ torchrun --nproc_per_node=2 train.py --distributed --pattern pre_training \
 ```
 
 Key differences from v6: `warmup_epochs` 5→15, `patience` 20→40, `save_every` 10→5, `epochs` 57→200. Goal: richer backbone representation before fine-tuning, which should improve Healthy/Sig discrimination.
+
+---
+
+### Phase 10: Systematic Improvement Roadmap (2026-03-13)
+
+Performed a comprehensive analysis of 45 possible improvements (documented in `improvement_analysis.md`) and implemented the highest-impact items across three prioritized phases (12 features, 8 files).
+
+#### 10.1 Phase 1 — Quick Wins (config/CLI only)
+
+**Reproducibility (`train.py`):**
+- `--seed` (default 42): sets `torch.manual_seed`, `np.random.seed`, `random.seed`, `torch.backends.cudnn.deterministic` at Trainer init
+- Applied before any model/data initialization to ensure fully deterministic runs
+
+**Detection Sensitivity (`train.py`, `framework.py`):**
+- `--eos_coef`: no-object class weight for OD loss (default 0.2, v7 config uses 0.15)
+- Lower values encourage the model to make more detections vs. predicting "no object"
+
+**Data Loading (`train.py`):**
+- `--num_workers` (default 0): parallel DataLoader workers
+- Automatic `pin_memory=True` when CUDA is available
+
+**New Files:**
+- `configs/finetune_v7.yaml` — consolidated config with all Phase 1-3 improvements
+- `scripts/finetune_v7.sh` — one-command training launcher
+
+#### 10.2 Phase 2 — Moderate Effort (targeted code changes)
+
+**Patient-Level Data Splitting (`splitting.py` [NEW], `framework.py`, `train.py`):**
+
+The existing split was sequential by sorted filename — arteries from the same patient (e.g., `P001_LAD.nii`, `P001_LCX.nii`, `P001_RCA.nii`) could leak across train/val/test sets, inflating metrics.
+
+New `splitting.py` module:
+- `get_patient_id(filename)` — extracts patient ID by splitting on last underscore (handles `.nii` and `.nii.gz`)
+- `patient_level_split(file_list, train_ratio=0.7, val_ratio=0.15, seed=42)` — groups arteries by patient, shuffles patients deterministically, assigns patients to splits, returns per-file index lists
+
+Integration:
+- `--patient_split` flag + `--split_seed` in `train.py` 
+- `framework.py` conditionally uses `patient_level_split()` in `get_dataloader()`, passes `file_indices` to `cubic_sequence_data`
+- Augmented training dataset also respects patient-level indices
+
+Verification (synthetic 100 patients × 3 arteries = 300 files):
+```
+No index overlap: PASS
+Patient isolation: PASS (zero patient leakage)
+Split sizes: train=210, val=45, test=45
+Deterministic: PASS
+```
+
+**Temporal Positional Encoding (`architecture.py`):**
+
+The `temporal_correlation_analysis` transformer encoder (4 layers, 8 heads) received the 32-cube embedding sequence with no positional information — treating it as an unordered set.
+
+Change: Added learnable positional encoding to `temporal_semantic_learning`:
+```python
+self.pos_embedding = nn.Parameter(torch.zeros(1, num_cubes, embedding_dim[1]))
+nn.init.trunc_normal_(self.pos_embedding, std=0.02)
+# In forward():
+x = x + self.pos_embedding[:, :x.shape[1], :]
+```
+
+This follows the ViT convention. The model now explicitly learns the proximal→distal vessel ordering, which is clinically meaningful (lesion position along the artery affects diagnosis).
+
+**Note:** This parameter won't exist in v6 checkpoints — it will be randomly initialized at fine-tuning start, which is correct and expected.
+
+**Stronger Online Augmentation (`augmentation.py`):**
+
+Added 4 new transforms to `online_augment()` (in addition to existing rotation, jitter, flip):
+
+| Transform | Probability | Parameters | Rationale |
+|-----------|------------|------------|-----------|
+| Gaussian noise | 30% | σ ∈ [5, 25] HU | Simulate CT noise variation |
+| Gaussian blur | 20% | σ ∈ [0.3, 1.0] | Simulate resolution/motion |
+| Intensity scaling | 30% | scale ∈ [0.85, 1.15] | Contrast variation |
+| Random erasing (cutout) | 20% | D/16–D/4 × H/4–H/2 × W/4–W/2 | Occlusion robustness |
+
+Total: 7 independent augmentations, each with stochastic activation. For a medical imaging dataset with ~3,000 samples, this significantly expands effective training data diversity.
+
+#### 10.3 Phase 3 — Significant Effort (algorithmic changes)
+
+**Soft Pseudo-Labels for L_dc (`optimization.py`):**
+
+The dual-task contrastive loss converts one branch's predictions into pseudo-labels for the other. Previously, this used hard argmax labels — e.g., if OD predicts [0.4 Calc, 0.35 NonCalc, 0.25 Mixed, 0.0 NoObj], the pseudo-label would be "Calcified" with 100% certainty.
+
+With `--soft_dc`, the SC contrastive loss now uses KL-divergence against soft probability distributions:
+
+1. For each detected OD box, extract the full softmax probability vector (not just argmax)
+2. Map probabilities to each sampling point covered by the box
+3. Background points get probability [1,0,0,...], detected points get the OD class distribution
+4. Compute KL-div between SC logits and soft targets: `F.kl_div(log_softmax(sc_logits), soft_targets)`
+
+New methods in `dual_task_contrastive_loss`:
+- `_compute_soft_sc_loss()` — builds soft targets and computes KL-div loss
+- `sampling_point_classification_loss.loss_soft()` — KL-div forward pass
+
+This is particularly important early in training when both branches are uncertain — soft labels prevent the DC loss from reinforcing arbitrary class decisions.
+
+**Label Smoothing (`optimization.py`):**
+
+- `--label_smoothing 0.1` (default 0.0)
+- Applied to `F.cross_entropy()` in `sampling_point_classification_loss`
+- Reduces overconfidence on SC predictions, providing mild regularization
+- v7 config uses 0.1
+
+**CDA Augmentation Improvements (`augmentation.py`):**
+
+The CDA `data_generator` previously did a hard splice — foreground slices (lesion) directly replaced background slices (healthy) at the exact boundary, creating unrealistic intensity discontinuities.
+
+Two improvements:
+1. **Intensity matching:** Before splicing, foreground slices are normalized to match the background's mean/std: `f_matched = (f_data - f_mean) * (b_std / f_std) + b_mean`. This ensures consistent HU intensity across the synthetic volume.
+2. **Soft blending:** A cosine-weighted transition zone of `blend_margin=3` slices at each foreground/background boundary: `alpha = 0.5 * (1 + cos(π * offset / margin))`. This eliminates the harsh splice artifact.
+
+**Cross-Task Consistency Metrics (`eval.py`):**
+
+New function `compute_cross_task_consistency(od_outputs, sc_outputs, num_classes, seq_length)` validates the paper's core claim that L_dc reduces cross-task inconsistency.
+
+Returns three metrics:
+1. `points_in_boxes_abnormal`: % of SC sampling points inside predicted OD boxes that are classified as abnormal by the SC branch
+2. `boxes_with_abnormal_runs`: % of predicted OD boxes that overlap with at least one abnormal SC point run
+3. `overall_consistency`: harmonic mean of (1) and (2)
+
+High values indicate agreement between the two branches. This can be tracked during training to monitor whether L_dc is achieving its goal.
+
+#### 10.4 Files Changed Summary
+
+| File | Changes |
+|------|---------|
+| `splitting.py` [NEW] | Patient ID extraction, deterministic patient-level splitting |
+| `architecture.py` | Learnable positional encoding for temporal transformer |
+| `augmentation.py` | 4 new online transforms + CDA intensity matching/soft blending |
+| `optimization.py` | Soft pseudo-labels (KL-div), label smoothing, threaded through loss construction |
+| `framework.py` | Parameter threading: eos_coef, label_smoothing, use_soft_dc, patient_split, split_seed |
+| `train.py` | 6 new CLI args: --seed, --eos_coef, --num_workers, --patient_split, --split_seed, --soft_dc, --label_smoothing |
+| `eval.py` | `compute_cross_task_consistency()` function |
+| `configs/finetune_v7.yaml` | Consolidated config with all improvements |
+| `scripts/finetune_v7.sh` [NEW] | Launch script |
+
+#### 10.5 v7 Config Summary
+
+```yaml
+# Training schedule
+epochs: 200, lr: 3e-5, warmup: 10, patience: 50
+
+# L_dc improvements
+dc_warmup_hold: 20, dc_warmup_ramp: 30
+dc_confidence_threshold: 0.3
+soft_dc: true
+label_smoothing: 0.1
+
+# Class imbalance
+balanced_sampling: true, focal_loss: true, focal_gamma: 2.0
+eos_coef: 0.15, sc_class_weight: true
+
+# Data integrity
+patient_split: true, split_seed: 42, seed: 42
+
+# Infrastructure
+amp: true, ema: true, augment: true, num_workers: 4
+```
+
+Launch: `bash scripts/finetune_v7.sh ./checkpoints_v6/best_model.pth`

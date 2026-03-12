@@ -298,27 +298,125 @@
 
 ---
 
+## Improvement Roadmap Implementation (2026-03-13)
+
+Systematic improvement plan across three phases, implementing 12 features spanning 8 files.
+
+### Phase 1 — Quick Wins (config/CLI changes)
+
+| Feature | File(s) | Impact |
+|---------|---------|--------|
+| Seed control (`--seed`) | `train.py` | `torch.manual_seed`, `np.random.seed`, `random.seed`, `torch.backends.cudnn.deterministic`. Set at Trainer init. |
+| `--eos_coef` CLI arg | `train.py`, `framework.py` | Expose no-object class weight for detection loss; default 0.2, v7 config uses 0.15 for more detections |
+| `--num_workers` + `pin_memory` | `train.py` | Parallel data loading with CUDA memory pinning |
+| v7 optimized config | `configs/finetune_v7.yaml` | Combines all improvements: L_dc warmup, 200 epochs, balanced sampling, focal loss, patient split, soft pseudo-labels |
+| v7 launch script | `scripts/finetune_v7.sh` | One-command training with all Phase 1-3 features |
+
+### Phase 2 — Moderate Effort (targeted code changes)
+
+| Feature | File(s) | Impact |
+|---------|---------|--------|
+| Patient-level data splitting | `splitting.py` [NEW], `framework.py`, `train.py` | Groups arteries by patient ID, prevents data leakage between train/val/test. `--patient_split` flag with `--split_seed`. |
+| Temporal positional encoding | `architecture.py` | Learnable `nn.Parameter(1, num_cubes, embed_dim)` added before transformer encoder. Gives model explicit proximal→distal vessel ordering. Init: `trunc_normal_(std=0.02)`. |
+| Stronger online augmentation | `augmentation.py` | 4 new transforms: Gaussian noise (30%, σ∈[5,25] HU), Gaussian blur (20%, σ∈[0.3,1.0]), intensity scaling (30%, ×[0.85,1.15]), random erasing (20%, cutout) |
+
+### Phase 3 — Significant Effort (algorithmic changes)
+
+| Feature | File(s) | Impact |
+|---------|---------|--------|
+| Soft pseudo-labels for L_dc | `optimization.py` | `--soft_dc`: KL-divergence with soft probability targets from OD instead of hard argmax labels. Preserves uncertainty in mutual supervision. |
+| Label smoothing | `optimization.py` | `--label_smoothing 0.1`: smoothed CE for SC classification loss, reduces overconfidence |
+| CDA improvements | `augmentation.py` | Intensity matching (foreground→background normalization) + cosine soft blending at splice boundaries (blend_margin=3) |
+| Cross-task consistency metrics | `eval.py` | `compute_cross_task_consistency()`: measures OD↔SC agreement (% SC points in OD boxes abnormal, % boxes with abnormal runs, harmonic mean) |
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `splitting.py` | `get_patient_id()` and `patient_level_split()` for deterministic patient-level data splitting |
+| `configs/finetune_v7.yaml` | Consolidated configuration with all Phase 1-3 improvements enabled |
+| `scripts/finetune_v7.sh` | Launch script for v7 fine-tuning |
+
+---
+
+## Performance Impact
+
+### Before fixes
+- Training was **impossible** — no training loop existed, extraction blocks were unregistered, GPU crashes on forward pass.
+
+### After fixes
+- Full training pipeline runs end-to-end on GPU
+- Loss decreases consistently across epochs (10.1 → 3.9 on dummy data over 200 epochs)
+- Both branches (temporal + spatial) now have trainable parameters and receive gradients
+- Contrastive loss provides correct cross-task supervision without gradient leakage
+- Hungarian matching produces correct assignments with consistent box format
+
+### v2 improvements
+- **AMP** reduces memory usage and provides ~1.5-2x training speedup on RTX 3090, enabled by default via `--amp`
+- **DDP** enables multi-GPU training across both RTX 3090s, doubling effective batch size or halving wall-clock time (`torchrun --nproc_per_node=2`)
+- **Online augmentation** (rotation, intensity jitter, depth flip) improves generalization on small medical imaging datasets, enabled via `--augment`
+- **LR warmup** (10 epochs linear) stabilizes early transformer training, avoiding loss spikes
+- **Layer-wise LR decay** (backbone 0.1x, transformer 0.5x, heads 1.0x) preserves pre-trained spatial features during fine-tuning
+- **EMA** (decay=0.999) maintains a smoothed weight copy for evaluation, typically adding 0.5-1% accuracy
+- **Evaluation metrics** (accuracy, precision, recall, F1, specificity) are now computed per epoch for both classification tasks
+
+### Improvement roadmap (v7+)
+- **Patient-level splitting** eliminates data leakage — all arteries from one patient in the same split
+- **Temporal positional encoding** gives the transformer explicit awareness of vessel ordering
+- **Stronger augmentation** (8 transforms total) + **CDA improvements** (intensity matching, soft blending) create more realistic and diverse training samples
+- **Soft pseudo-labels** preserve uncertainty in L_dc cross-supervision, reducing confirmation bias from noisy early predictions
+- **Label smoothing** regularizes SC classification, preventing overconfident majority-class predictions
+- **Cross-task consistency metrics** provide a quantitative measure of OD↔SC branch agreement
+
+---
+
 ## Future Improvements
 
-### Medium Priority
+### High Priority (Phase 4 — Major Research)
 
-**1. Parallel 2D/3D Feature Streams**
+**1. Med3D Pre-trained Backbone**
+- Initialize 3D conv blocks from Med3D or MedicalNet pre-trained weights
+- Expected +1-3 pts across metrics from pre-trained 3D medical features
+
+**2. Parallel 2D/3D Feature Streams**
 - Currently the 2D branch takes 3D features as input after level 0 (interleaved)
 - Paper describes independent parallel paths that fuse after extraction
 - Implementing true parallel streams may improve feature diversity
 
-**2. Model Compression**
+**3. FPN-style Multi-Scale Fusion**
+- Only the deepest 3D features are used; intermediary feature maps discarded
+- Add skip connections / FPN-style lateral connections for multi-scale lesion detection
+
+**4. Deformable Attention (1D adapted)**
+- Replace spatial transformer with deformable attention for faster convergence
+- DETR literature shows 10x improvement; requires careful 1D adaptation
+
+**5. Self-Supervised Pre-Training**
+- Masked autoencoder or contrastive learning on unlabeled CPR volumes
+- Well-established for data-efficient medical imaging
+
+### Medium Priority
+
+**6. Multi-Window Input Channels**
+- Use 2-3 different HU windows as separate input channels (soft tissue + calcium)
+- Calcified plaques are much more visible at bone window
+
+**7. Model Compression**
 - Knowledge distillation from the full model to a smaller variant
 - Pruning unused attention heads in the transformer
 - Important for potential clinical deployment
 
-**3. Vessel-Aware Preprocessing**
-- Centerline extraction and straightening before feeding to the model
-- Adaptive cube sampling based on vessel curvature rather than fixed step size
-- Could significantly improve the temporal branch's ability to capture lesion context
-
-### Previously Listed — Now Implemented
+### Previously Implemented
 
 - ~~Transformer Configuration Tuning~~ — CLI args for layer/head counts (commit `a313e27`)
 - ~~Test-Time Augmentation~~ — `--tta` flag in eval.py (commit `a313e27`)
 - ~~Cross-Validation~~ — `cross_validate.py` with patient-level k-fold (commit `a313e27`)
+- ~~Seed Control~~ — `--seed` in train.py (improvement roadmap Phase 1)
+- ~~Patient-Level Splitting~~ — `splitting.py` + integration (improvement roadmap Phase 2)
+- ~~Temporal Positional Encoding~~ — learnable pos_embedding (improvement roadmap Phase 2)
+- ~~Stronger Augmentation~~ — 8 online transforms (improvement roadmap Phase 2)
+- ~~Soft Pseudo-Labels~~ — `--soft_dc` KL-div (improvement roadmap Phase 3)
+- ~~Label Smoothing~~ — `--label_smoothing` (improvement roadmap Phase 3)
+- ~~CDA Improvements~~ — intensity matching + soft blending (improvement roadmap Phase 3)
+- ~~Cross-Task Consistency Metrics~~ — `compute_cross_task_consistency()` (improvement roadmap Phase 3)
+

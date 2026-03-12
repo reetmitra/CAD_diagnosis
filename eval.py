@@ -401,6 +401,91 @@ def compute_metrics(y_true, y_pred, num_classes):
     }
 
 
+def compute_cross_task_consistency(od_outputs, sc_outputs, num_classes, seq_length=32):
+    """Measure agreement between OD and SC branch predictions.
+
+    Validates the paper's claim that L_dc reduces cross-task inconsistency.
+
+    Args:
+        od_outputs: dict with 'pred_logits' [B, Q, C+1], 'pred_boxes' [B, Q, 2]
+        sc_outputs: dict with 'pred_logits' [B, L, C+1]
+        num_classes: int (3 or 6)
+        seq_length: int (number of sampling points, default 32)
+
+    Returns:
+        dict with:
+        - points_in_boxes_abnormal: % of SC points inside OD boxes classified as abnormal
+        - boxes_with_abnormal_runs: % of OD boxes that overlap with abnormal SC point runs
+        - overall_consistency: harmonic mean of the two
+    """
+    batch_size = od_outputs['pred_logits'].shape[0]
+    total_points_in_boxes = 0
+    abnormal_points_in_boxes = 0
+    total_boxes = 0
+    boxes_with_overlap = 0
+
+    for b in range(batch_size):
+        # OD predictions: get detected boxes
+        od_probs = F.softmax(od_outputs['pred_logits'][b], dim=-1)  # [Q, C+1]
+        od_classes = od_probs.argmax(dim=-1)  # [Q]
+        od_boxes = od_outputs['pred_boxes'][b]  # [Q, 2] = [cx, w]
+
+        # SC predictions: get point classifications
+        sc_probs = F.softmax(sc_outputs['pred_logits'][b], dim=-1)  # [L, C+1]
+        sc_classes = sc_probs.argmax(dim=-1)  # [L]
+
+        # Metric 1: For each detected box, check if SC points inside are abnormal
+        interval = 1.0 / (seq_length + 1)
+        for q in range(od_classes.shape[0]):
+            if od_classes[q] >= num_classes:  # no-object
+                continue
+            total_boxes += 1
+
+            cx = od_boxes[q, 0].item()
+            w = od_boxes[q, 1].item()
+            x1, x2 = cx - w / 2.0, cx + w / 2.0
+            start = max(0, int(round(x1 / interval)) - 1)
+            end = min(seq_length - 1, int(round(x2 / interval)) - 1)
+
+            if start > end:
+                continue
+
+            points_in_box = sc_classes[start:end + 1]
+            n_points = points_in_box.shape[0]
+            n_abnormal = (points_in_box > 0).sum().item()
+
+            total_points_in_boxes += n_points
+            abnormal_points_in_boxes += n_abnormal
+
+            if n_abnormal > 0:
+                boxes_with_overlap += 1
+
+    # Compute final metrics
+    if total_points_in_boxes > 0:
+        points_abnormal_rate = abnormal_points_in_boxes / total_points_in_boxes
+    else:
+        points_abnormal_rate = 0.0
+
+    if total_boxes > 0:
+        boxes_overlap_rate = boxes_with_overlap / total_boxes
+    else:
+        boxes_overlap_rate = 0.0
+
+    # Harmonic mean as overall consistency
+    if points_abnormal_rate + boxes_overlap_rate > 0:
+        overall = 2 * points_abnormal_rate * boxes_overlap_rate / (
+            points_abnormal_rate + boxes_overlap_rate)
+    else:
+        overall = 0.0
+
+    return {
+        'points_in_boxes_abnormal': points_abnormal_rate,
+        'boxes_with_abnormal_runs': boxes_overlap_rate,
+        'overall_consistency': overall,
+        'total_boxes': total_boxes,
+    }
+
+
 def od_predictions_to_artery_level(od_outputs, num_classes):
     """
     Convert object detection predictions to artery-level classifications.

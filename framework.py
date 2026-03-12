@@ -11,6 +11,7 @@ from config import opt
 import functions as funcs
 import optimization as opt_fn
 import augmentation as aug
+from splitting import patient_level_split
 
 
 class sc_net_framework:
@@ -19,6 +20,9 @@ class sc_net_framework:
                  delta=1.0, sc_class_weights=None,
                  use_focal=False, focal_gamma=2.0,
                  dc_confidence_threshold=0.0,
+                 eos_coef=None,
+                 label_smoothing=0.0, use_soft_dc=False,
+                 patient_split=False, split_seed=42,
                  temporal_encoder_layers=None, temporal_heads=None,
                  spatial_encoder_layers=None, spatial_decoder_layers=None):
 
@@ -36,6 +40,16 @@ class sc_net_framework:
         self._use_focal = use_focal
         self._focal_gamma = focal_gamma
         self._dc_confidence_threshold = dc_confidence_threshold
+        self._eos_coef = eos_coef
+        self._label_smoothing = label_smoothing
+        self._use_soft_dc = use_soft_dc
+        self._patient_split = patient_split
+        self._split_seed = split_seed
+
+        # Will hold split indices when patient_split is used
+        self.train_indices = None
+        self.val_indices = None
+        self.test_indices = None
 
         # Store transformer overrides
         self._temporal_encoder_layers = temporal_encoder_layers
@@ -67,7 +81,10 @@ class sc_net_framework:
             self.loss_fn = self.get_loss_fn(delta=delta, sc_class_weights=sc_class_weights,
                                                use_focal=self._use_focal,
                                                focal_gamma=self._focal_gamma,
-                                               dc_confidence_threshold=self._dc_confidence_threshold)
+                                               dc_confidence_threshold=self._dc_confidence_threshold,
+                                               eos_coef=self._eos_coef,
+                                               label_smoothing=self._label_smoothing,
+                                               use_soft_dc=self._use_soft_dc)
             self.dataLoader_train, self.dataLoader_eval, self.dataLoader_test = self.get_dataloader()
 
     def get_model(self):
@@ -113,40 +130,80 @@ class sc_net_framework:
 
     def get_loss_fn(self, delta=1.0, sc_class_weights=None,
                     use_focal=False, focal_gamma=2.0,
-                    dc_confidence_threshold=0.0):
+                    dc_confidence_threshold=0.0,
+                    eos_coef=None,
+                    label_smoothing=0.0, use_soft_dc=False):
+        effective_eos = eos_coef if eos_coef is not None else opt.data_params["eos_coef"]
         return opt_fn.spatio_temporal_contrast_loss(
             num_classes=self.model_num_classes,
             seq_length=opt.net_params["cubeseq_length"],
-            eos_coef=opt.data_params["eos_coef"],
+            eos_coef=effective_eos,
             delta=delta,
             sc_class_weights=sc_class_weights,
             use_focal=use_focal,
             focal_gamma=focal_gamma,
             dc_confidence_threshold=dc_confidence_threshold,
+            label_smoothing=label_smoothing,
+            use_soft_dc=use_soft_dc,
         )
 
     def get_dataloader(self):
-        dataset_training = aug.cubic_sequence_data(
-            dataset_root=self.data_root,
-            pattern='training',
-            train_ratio=self.train_ratio,
-            input_shape=self.input_shape,
-            window=self.window_lw,
-            num_classes=self.model_num_classes)
-        dataset_validation = aug.cubic_sequence_data(
-            dataset_root=self.data_root,
-            pattern='validation',
-            train_ratio=self.train_ratio,
-            input_shape=self.input_shape,
-            window=self.window_lw,
-            num_classes=self.model_num_classes)
-        dataset_testing = aug.cubic_sequence_data(
-            dataset_root=self.data_root,
-            pattern='testing',
-            train_ratio=self.train_ratio,
-            input_shape=self.input_shape,
-            window=self.window_lw,
-            num_classes=self.model_num_classes)
+        # Compute patient-level split indices if requested
+        if self._patient_split:
+            volumes_root = os.path.join(self.data_root, 'volumes/')
+            file_list = sorted(os.listdir(volumes_root))
+            train_idx, val_idx, test_idx = patient_level_split(
+                file_list, train_ratio=self.train_ratio,
+                val_ratio=(1 - self.train_ratio) / 2,
+                seed=self._split_seed,
+            )
+            self.train_indices = train_idx
+            self.val_indices = val_idx
+            self.test_indices = test_idx
+
+            dataset_training = aug.cubic_sequence_data(
+                dataset_root=self.data_root,
+                pattern='training',
+                input_shape=self.input_shape,
+                window=self.window_lw,
+                num_classes=self.model_num_classes,
+                file_indices=train_idx)
+            dataset_validation = aug.cubic_sequence_data(
+                dataset_root=self.data_root,
+                pattern='validation',
+                input_shape=self.input_shape,
+                window=self.window_lw,
+                num_classes=self.model_num_classes,
+                file_indices=val_idx)
+            dataset_testing = aug.cubic_sequence_data(
+                dataset_root=self.data_root,
+                pattern='testing',
+                input_shape=self.input_shape,
+                window=self.window_lw,
+                num_classes=self.model_num_classes,
+                file_indices=test_idx)
+        else:
+            dataset_training = aug.cubic_sequence_data(
+                dataset_root=self.data_root,
+                pattern='training',
+                train_ratio=self.train_ratio,
+                input_shape=self.input_shape,
+                window=self.window_lw,
+                num_classes=self.model_num_classes)
+            dataset_validation = aug.cubic_sequence_data(
+                dataset_root=self.data_root,
+                pattern='validation',
+                train_ratio=self.train_ratio,
+                input_shape=self.input_shape,
+                window=self.window_lw,
+                num_classes=self.model_num_classes)
+            dataset_testing = aug.cubic_sequence_data(
+                dataset_root=self.data_root,
+                pattern='testing',
+                train_ratio=self.train_ratio,
+                input_shape=self.input_shape,
+                window=self.window_lw,
+                num_classes=self.model_num_classes)
         return DataLoader(dataset_training, batch_size=self.batch_size, shuffle=True, collate_fn=aug.collate_fn),\
                DataLoader(dataset_validation, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn),\
                DataLoader(dataset_testing, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn)
