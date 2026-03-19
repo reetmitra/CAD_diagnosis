@@ -24,7 +24,8 @@ class sc_net_framework:
                  label_smoothing=0.0, use_soft_dc=False,
                  patient_split=False, split_seed=42,
                  temporal_encoder_layers=None, temporal_heads=None,
-                 spatial_encoder_layers=None, spatial_decoder_layers=None):
+                 spatial_encoder_layers=None, spatial_decoder_layers=None,
+                 multi_window=False):
 
         if pattern == "pre_training":
             self.model_pattern = "training"
@@ -56,6 +57,8 @@ class sc_net_framework:
         self._temporal_heads = temporal_heads
         self._spatial_encoder_layers = spatial_encoder_layers
         self._spatial_decoder_layers = spatial_decoder_layers
+        self._multi_window = multi_window
+        self.in_channels = 3 if multi_window else opt.net_params["in_channels"]
 
         self.model = self.get_model()
         self.state_dict_root = state_dict_root
@@ -107,7 +110,7 @@ class sc_net_framework:
             num_classes=self.model_num_classes,
             pattern=self.model_pattern,
             ret_map=opt.net_params["ret_map"],
-            in_channels=opt.net_params["in_channels"],
+            in_channels=self.in_channels,
             _3d_cube_selection=opt.sc_params["_3d_cube_selection"],
             temporal_conv_levels=opt.sc_params["temporal_conv_levels"],
             temporal_conv_maps=opt.sc_params["temporal_conv_maps"],
@@ -167,21 +170,24 @@ class sc_net_framework:
                 input_shape=self.input_shape,
                 window=self.window_lw,
                 num_classes=self.model_num_classes,
-                file_indices=train_idx)
+                file_indices=train_idx,
+                multi_window=self._multi_window)
             dataset_validation = aug.cubic_sequence_data(
                 dataset_root=self.data_root,
                 pattern='validation',
                 input_shape=self.input_shape,
                 window=self.window_lw,
                 num_classes=self.model_num_classes,
-                file_indices=val_idx)
+                file_indices=val_idx,
+                multi_window=self._multi_window)
             dataset_testing = aug.cubic_sequence_data(
                 dataset_root=self.data_root,
                 pattern='testing',
                 input_shape=self.input_shape,
                 window=self.window_lw,
                 num_classes=self.model_num_classes,
-                file_indices=test_idx)
+                file_indices=test_idx,
+                multi_window=self._multi_window)
         else:
             dataset_training = aug.cubic_sequence_data(
                 dataset_root=self.data_root,
@@ -189,21 +195,24 @@ class sc_net_framework:
                 train_ratio=self.train_ratio,
                 input_shape=self.input_shape,
                 window=self.window_lw,
-                num_classes=self.model_num_classes)
+                num_classes=self.model_num_classes,
+                multi_window=self._multi_window)
             dataset_validation = aug.cubic_sequence_data(
                 dataset_root=self.data_root,
                 pattern='validation',
                 train_ratio=self.train_ratio,
                 input_shape=self.input_shape,
                 window=self.window_lw,
-                num_classes=self.model_num_classes)
+                num_classes=self.model_num_classes,
+                multi_window=self._multi_window)
             dataset_testing = aug.cubic_sequence_data(
                 dataset_root=self.data_root,
                 pattern='testing',
                 train_ratio=self.train_ratio,
                 input_shape=self.input_shape,
                 window=self.window_lw,
-                num_classes=self.model_num_classes)
+                num_classes=self.model_num_classes,
+                multi_window=self._multi_window)
         return DataLoader(dataset_training, batch_size=self.batch_size, shuffle=True, collate_fn=aug.collate_fn),\
                DataLoader(dataset_validation, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn),\
                DataLoader(dataset_testing, batch_size=self.batch_size, shuffle=False, collate_fn=aug.collate_fn)

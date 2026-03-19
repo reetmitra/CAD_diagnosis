@@ -31,28 +31,77 @@ def normalize_ct_data(data_array, hu_min=-150, hu_max=750):
     return normalized_array
 
 
+# Default multi-window definitions: (center, width) → HU range [center-width/2, center+width/2]
+DEFAULT_MULTI_WINDOWS = [
+    [300, 900],    # Soft tissue: [-150, 750]
+    [300, 1500],   # Calcium/bone: [-450, 1050]
+    [100, 700],    # Vascular: [-250, 450]
+]
+
+
+def normalize_ct_data_multiwindow(data_array, windows):
+    """Apply multiple HU windows and stack as channels.
+
+    Args:
+        data_array: numpy array [D, H, W] of raw HU values
+        windows: list of [center, width] pairs
+
+    Returns:
+        numpy array [C, D, H, W] where C = len(windows)
+    """
+    channels = []
+    for center, width in windows:
+        hu_min = center - width / 2
+        hu_max = center + width / 2
+        channels.append(normalize_ct_data(data_array, hu_min=hu_min, hu_max=hu_max))
+    return np.stack(channels, axis=0)
+
+
 def _3d_cubes_selection(input_volume, cube_size, num_cubes, step, batch_size):
 
-    b, n_l, n_h, n_w = input_volume.shape
-    centers = [step // 2 + step * i - 1 for i in range(num_cubes)]
-    output_cubes = torch.zeros((batch_size, len(centers), cube_size, cube_size, cube_size),
-                               device=input_volume.device, dtype=input_volume.dtype)
+    if input_volume.dim() == 5:
+        # Multi-channel input: [B, C, D, H, W]
+        b, ch, n_l, n_h, n_w = input_volume.shape
+        centers = [step // 2 + step * i - 1 for i in range(num_cubes)]
+        output_cubes = torch.zeros((batch_size, len(centers), ch, cube_size, cube_size, cube_size),
+                                   device=input_volume.device, dtype=input_volume.dtype)
+        for i, center in enumerate(centers):
+            start = center - cube_size // 2
+            end = start + cube_size
+            set_start, set_end = 0, cube_size
+            if start < 0:
+                set_start -= start
+                start = 0
+            if end > n_l:
+                set_end = cube_size - (end - n_l)
+                end = n_l
+            cut_start, cut_end = int(n_h / 2 - cube_size // 2), int(n_h / 2 + cube_size // 2 + 1)
+            output_cubes[:, i, :, set_start:set_end, :, :] = input_volume[:, :, start:end,
+                                                                           cut_start:cut_end,
+                                                                           cut_start:cut_end]
+        return output_cubes
+    else:
+        # Single-channel input: [B, D, H, W] (original behavior)
+        b, n_l, n_h, n_w = input_volume.shape
+        centers = [step // 2 + step * i - 1 for i in range(num_cubes)]
+        output_cubes = torch.zeros((batch_size, len(centers), cube_size, cube_size, cube_size),
+                                   device=input_volume.device, dtype=input_volume.dtype)
 
-    for i, center in enumerate(centers):
-        start = center - cube_size // 2
-        end = start + cube_size
-        set_start, set_end = 0, cube_size
-        if start < 0:
-            set_start -= start
-            start = 0
-        if end > n_l:
-            set_end = cube_size - (end - n_l)
-            end = n_l
-        cut_start, cut_end = int(n_h / 2 - cube_size // 2), int(n_h / 2 + cube_size // 2 + 1)
-        output_cubes[:, i, set_start: set_end, :, :] = input_volume[:, start:end,
-                                                                    cut_start: cut_end,
-                                                                    cut_start: cut_end]
-    return output_cubes
+        for i, center in enumerate(centers):
+            start = center - cube_size // 2
+            end = start + cube_size
+            set_start, set_end = 0, cube_size
+            if start < 0:
+                set_start -= start
+                start = 0
+            if end > n_l:
+                set_end = cube_size - (end - n_l)
+                end = n_l
+            cut_start, cut_end = int(n_h / 2 - cube_size // 2), int(n_h / 2 + cube_size // 2 + 1)
+            output_cubes[:, i, set_start: set_end, :, :] = input_volume[:, start:end,
+                                                                        cut_start: cut_end,
+                                                                        cut_start: cut_end]
+        return output_cubes
 
 
 def number_parameters(Net, type_size=8):

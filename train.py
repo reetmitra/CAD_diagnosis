@@ -140,6 +140,9 @@ def parse_args(argv=None):
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Gamma (focusing param) for focal loss (default: 2.0)')
 
+    parser.add_argument('--multi_window', action='store_true', default=False,
+                        help='Use 3 stacked HU windows as input channels (soft tissue, calcium, vascular)')
+
     # --- Ldc improvements ---
     parser.add_argument('--dc_warmup_hold', type=int, default=0,
                         help='Hold dc_weight=0 for this many epochs (default: 0)')
@@ -312,6 +315,7 @@ class Trainer:
             temporal_heads=getattr(self.args, 'temporal_heads', None),
             spatial_encoder_layers=getattr(self.args, 'spatial_encoder_layers', None),
             spatial_decoder_layers=getattr(self.args, 'spatial_decoder_layers', None),
+            multi_window=self.args.multi_window,
         )
         self._fw = fw  # keep reference for data setup
 
@@ -342,13 +346,24 @@ class Trainer:
                 input_shape=fw.input_shape,
                 window=fw.window_lw,
                 augment=True,
-                num_classes=self.num_classes,
-                file_indices=fw.train_indices,
+                num_classes=fw.model_num_classes,
+                file_indices=getattr(fw, 'train_indices', None),
+                multi_window=self.args.multi_window
             )
         else:
             train_dataset = fw.dataLoader_train.dataset
 
-        eval_dataset = fw.dataLoader_eval.dataset
+        eval_dataset = aug.cubic_sequence_data(
+            dataset_root=fw.data_root,
+            pattern='eval',
+            train_ratio=fw.train_ratio,
+            input_shape=fw.input_shape,
+            window=fw.window_lw,
+            augment=False, # No augmentation for evaluation
+            num_classes=fw.model_num_classes,
+            file_indices=getattr(fw, 'eval_indices', None),
+            multi_window=self.args.multi_window
+        )
         batch_size = opt.data_params["batch_size"]
 
         # Samplers

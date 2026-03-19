@@ -142,10 +142,21 @@ class temporal_semantic_learning(nn.Module):
         self.softmax_classify = sampling_point_classify(num_class=num_classes, dim_list=[class_dim[0], class_dim[1]])
 
     def forward(self, img):
-        b, c, n_h, n_w = img.shape
-        x = funcs._3d_cubes_selection(img, cube_size=self.cube_size, num_cubes=self.num_cubes, step=self.cubes_step, batch_size=b)
+        if img.dim() == 5:
+            # Multi-channel: [B, C, D, H, W]
+            b, ch, n_d, n_h, n_w = img.shape
+            x = funcs._3d_cubes_selection(img, cube_size=self.cube_size, num_cubes=self.num_cubes, step=self.cubes_step, batch_size=b)
+            # x: [B, num_cubes, C, cube, cube, cube]
+            x = rearrange(x, 'b n c d h w -> (b n) c d h w')
+        else:
+            # Single-channel: [B, D, H, W]
+            b = img.shape[0]
+            x = funcs._3d_cubes_selection(img, cube_size=self.cube_size, num_cubes=self.num_cubes, step=self.cubes_step, batch_size=b)
+            # x: [B, num_cubes, cube, cube, cube] → add channel dim
+            x = rearrange(x, 'b n d h w -> (b n) 1 d h w')
         x = self._3dcnn(x)
-        x = self.flattening_projection(x)
+        x = rearrange(x, '(b n) c d h w -> b n (c d h w)', b=b, n=self.num_cubes)
+        x = self.flattening_projection.projection(x)
         # Add positional encoding: x is (B, L, D)
         x = x + self.pos_embedding[:, :x.shape[1], :]
         x = self.temporal_correlation_analysis(x)
@@ -237,8 +248,10 @@ class feature_extraction_3d(nn.Module):
         ])
 
     def forward(self, x):
-        b, n_l, n_h, n_w = x.shape
-        x = rearrange(x, '(b c) n_l n_h n_w -> b c n_l n_h n_w', c=1)
+        if x.dim() == 4:
+            # Single-channel: [B, D, H, W] → [B, 1, D, H, W]
+            x = x.unsqueeze(1)
+        # x is now [B, C, D, H, W]
         x_3d = None
 
         for i in range(self.conv_levels):
@@ -308,7 +321,10 @@ class spatial_semantic_learning(nn.Module):
         self.object_detection = bounding_box_prediction(num_class=num_classes, dim_list=od_dim_list)
 
     def forward(self, img):
-        b, n_l, n_h, n_w = img.shape
+        if img.dim() == 5:
+            b = img.shape[0]
+        else:
+            b, n_l, n_h, n_w = img.shape
 
         x = self.feature_3d(img)
         emb_f = self.flattening_projection(x)
