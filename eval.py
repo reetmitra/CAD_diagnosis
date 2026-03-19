@@ -1049,7 +1049,7 @@ def _resolve_ensemble_paths(paths):
     return resolved
 
 
-def _load_model_from_checkpoint(checkpoint_path, pattern, device, data_root=None):
+def _load_model_from_checkpoint(checkpoint_path, pattern, device, data_root=None, multi_window=False):
     """Load a single model from a checkpoint file.
 
     Args:
@@ -1057,6 +1057,7 @@ def _load_model_from_checkpoint(checkpoint_path, pattern, device, data_root=None
         pattern: 'pre_training' or 'fine_tuning'
         device: torch device
         data_root: optional data root override
+        multi_window: whether model expects multi-channel inputs
 
     Returns:
         model: loaded model on device in eval mode
@@ -1065,6 +1066,7 @@ def _load_model_from_checkpoint(checkpoint_path, pattern, device, data_root=None
         pattern=pattern,
         state_dict_root=None,
         data_root=data_root,
+        multi_window=multi_window,
     )
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
@@ -1713,11 +1715,11 @@ def main():
         if len(checkpoint_paths) == 0:
             print("Error: No checkpoint files found for --ensemble paths.")
             return
-        print(f"\nEnsemble mode: loading {len(checkpoint_paths)} models...")
+        print(f"Loading {len(checkpoint_paths)} model(s) on {device}...")
         models = []
         for ckpt_path in checkpoint_paths:
             model = _load_model_from_checkpoint(
-                ckpt_path, args.pattern, device, data_root=args.data_root)
+                ckpt_path, args.pattern, device, data_root=args.data_root, multi_window=args.multi_window)
             models.append(model)
 
         # Build test loader from first model's framework (for dataset access)

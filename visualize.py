@@ -48,7 +48,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from functions import normalize_ct_data
+from functions import normalize_ct_data, normalize_ct_data_multiwindow, DEFAULT_MULTI_WINDOWS
 from eval import (
     od_predictions_to_artery_level,
     targets_to_artery_level,
@@ -232,8 +232,12 @@ def predict_artery(model, volume, device, num_classes,
         plaque_pred:   int 0-2 or -1
         od_outputs:    raw dict with 'pred_logits' [Q, C+1] and 'pred_boxes' [Q, 2]
     """
-    # Normalise and convert to tensor [1, D, H, W]
-    vol_norm = normalize_ct_data(volume, hu_min=HU_MIN, hu_max=HU_MAX)
+    # Normalise and convert to tensor
+    if hasattr(model, 'in_channels') and model.in_channels > 1:
+        vol_norm = normalize_ct_data_multiwindow(volume, DEFAULT_MULTI_WINDOWS)
+    else:
+        vol_norm = normalize_ct_data(volume, hu_min=HU_MIN, hu_max=HU_MAX)
+    
     tensor = torch.tensor(vol_norm, dtype=torch.float32).unsqueeze(0).to(device)
 
     outputs = model(tensor)
@@ -299,6 +303,8 @@ def parse_args():
                         help='Calibration JSON for checkpoint2')
     parser.add_argument('--use_constrained2', action='store_true',
                         help='Use constrained_stenosis_thresholds from --thresholds2 JSON')
+    parser.add_argument('--multi_window', action='store_true', default=False,
+                        help='Use multi-window inference for checkpoint(s) if applicable')
     parser.add_argument('--label', type=str, default='Model A',
                         help='Display label for model 1 strip (default: "Model A")')
     parser.add_argument('--label2', type=str, default='Model B',
@@ -322,7 +328,7 @@ def main():
     if args.checkpoint:
         print(f"Loading model 1 from {args.checkpoint}...")
         model = _load_model_from_checkpoint(
-            args.checkpoint, args.model_pattern, device, args.data_root)
+            args.checkpoint, args.model_pattern, device, args.data_root, args.multi_window)
         model.eval()
 
     stenosis_t, plaque_t = load_thresholds(args.thresholds, args.use_constrained)
@@ -338,7 +344,7 @@ def main():
     if args.checkpoint2:
         print(f"Loading model 2 from {args.checkpoint2}...")
         model2 = _load_model_from_checkpoint(
-            args.checkpoint2, args.model_pattern2, device, args.data_root)
+            args.checkpoint2, args.model_pattern2, device, args.data_root, args.multi_window)
         model2.eval()
         stenosis_t2, plaque_t2 = load_thresholds(args.thresholds2, args.use_constrained2)
         if stenosis_t2:
