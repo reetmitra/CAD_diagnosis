@@ -91,8 +91,8 @@ def compute_sc_class_weights(num_classes, boost_nonsig=False, nonsig_idx=2):
             (background class 0 included).
         boost_nonsig: If True, double the weight for the Non-significant
             stenosis class to push the model to differentiate it.
-        nonsig_idx: 1-based class index for Non-significant stenosis.
-            Default 2 matches fine_tuning 6-class setup.
+        nonsig_idx: Index into the weights tensor for Non-significant stenosis
+            (0=background, 1=Healthy, 2=NonSig, 3=Sig, ...). Default 2.
     """
     weights = torch.ones(num_classes + 1, dtype=torch.float32)
     weights[0] = 0.5       # background

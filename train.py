@@ -297,9 +297,13 @@ class Trainer:
         # Compute SC class weights if enabled
         sc_class_weights = None
         if self.args.sc_class_weight:
+            boost_nonsig = self.args.boost_nonsig
+            if boost_nonsig and self.args.pattern != 'fine_tuning':
+                print("  [Warning] --boost_nonsig has no meaningful effect in pre_training mode; ignoring.")
+                boost_nonsig = False
             sc_class_weights = compute_sc_class_weights(
                 num_classes=self.num_classes,
-                boost_nonsig=self.args.boost_nonsig,
+                boost_nonsig=boost_nonsig,
                 nonsig_idx=2,
             )
 
@@ -898,6 +902,7 @@ class Trainer:
         if self.args.balanced_sampling:
             print(f"  Balanced sample:  True")
         print(f"  SC class weight:  {self.args.sc_class_weight}")
+        print(f"  NonSig boost:     {args.boost_nonsig}")
         print(f"  Focal loss:       {self.args.focal_loss}"
               + (f" (gamma={self.args.focal_gamma})" if self.args.focal_loss else ""))
         print(f"  Num classes:      {self.num_classes}")

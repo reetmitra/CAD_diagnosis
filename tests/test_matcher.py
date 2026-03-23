@@ -111,3 +111,13 @@ def test_sc_class_weights_nonsig_boosted():
     assert weights[2].item() == pytest.approx(3.0), f"Boosted Non-sig should be 3.0, got {weights[2]}"
     assert weights[3].item() == pytest.approx(1.5), f"Sig should still be 1.5, got {weights[3]}"
     assert weights[1].item() == pytest.approx(1.5), f"Healthy should still be 1.5, got {weights[1]}"
+
+
+def test_sc_class_weights_boost_nonsig_pretrain_passthrough():
+    """In pre_training (3-class) mode, boost_nonsig=True modifies weights[2].
+    weights[2] is NOT Non-sig stenosis in pre_training — document current behaviour
+    so any future suppression is an explicit, visible change."""
+    weights = compute_sc_class_weights(num_classes=3, boost_nonsig=True, nonsig_idx=2)
+    # Guard (2 <= 3) passes; weights[2] is doubled to 3.0
+    # To suppress boosting in pre_training, change this to 1.5 and add the guard
+    assert weights[2].item() == pytest.approx(3.0)
