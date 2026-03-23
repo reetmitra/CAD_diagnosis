@@ -153,14 +153,16 @@ class HungarianMatcher(nn.Module):
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
-        # For each batch item, match predictions to its targets
+        # split_cost_matrices[b] has shape [bs, num_queries, size_b]
+        # We want split_cost_matrices[b][b] — queries of batch b matched against targets of batch b
         indices = []
+        split_cost_matrices = C.split(sizes, -1)
         for b in range(bs):
-            batch_indices = []
-            for cost_matrix in C.split(sizes, -1):
-                batch_indices.append(linear_sum_assignment(cost_matrix[b]))
-            indices.extend(batch_indices)
-        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+            i, j = linear_sum_assignment(split_cost_matrices[b][b].numpy())
+            indices.append(
+                (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
+            )
+        return indices
 
 
 def box_lastdim_expansion(data):
