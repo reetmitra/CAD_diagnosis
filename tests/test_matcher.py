@@ -87,3 +87,27 @@ def test_matcher_bs1():
     targets = _make_targets([2], 3)
     indices = matcher(outputs, targets)
     assert len(indices) == 1
+
+
+from optimization import compute_sc_class_weights
+
+
+def test_sc_class_weights_shape():
+    """compute_sc_class_weights must return tensor of length num_classes+1."""
+    weights = compute_sc_class_weights(num_classes=3)
+    assert weights.shape == (4,), f"Expected shape (4,), got {weights.shape}"
+
+
+def test_sc_class_weights_default_no_boost():
+    """Without boost, all lesion classes have equal weight 1.5."""
+    weights = compute_sc_class_weights(num_classes=6)
+    for i in range(1, 7):
+        assert weights[i].item() == pytest.approx(1.5), f"Class {i} should be 1.5, got {weights[i]}"
+
+
+def test_sc_class_weights_nonsig_boosted():
+    """With boost_nonsig=True, Non-sig class (idx 2) gets 3.0 weight (1.5 * 2)."""
+    weights = compute_sc_class_weights(num_classes=6, boost_nonsig=True, nonsig_idx=2)
+    assert weights[2].item() == pytest.approx(3.0), f"Boosted Non-sig should be 3.0, got {weights[2]}"
+    assert weights[3].item() == pytest.approx(1.5), f"Sig should still be 1.5, got {weights[3]}"
+    assert weights[1].item() == pytest.approx(1.5), f"Healthy should still be 1.5, got {weights[1]}"

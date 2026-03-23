@@ -82,23 +82,23 @@ class object_detection_loss(nn.Module):
         return loss_labels + loss_boxes
 
 
-def compute_sc_class_weights(num_classes):
+def compute_sc_class_weights(num_classes, boost_nonsig=False, nonsig_idx=2):
     """Return inverse-frequency inspired class weights for SC loss.
-
-    Background (class 0) accounts for ~64% of sampling points, so it gets
-    a lower weight (0.5) while all lesion classes share weight 1.5.
 
     Args:
         num_classes: Number of lesion classes (e.g. 3 for pre_training,
-            6 for fine_tuning).  The returned tensor has length
-            ``num_classes + 1`` (background class 0 included).
-
-    Returns:
-        Tensor of shape [num_classes + 1].
+            6 for fine_tuning). Returned tensor has length num_classes+1
+            (background class 0 included).
+        boost_nonsig: If True, double the weight for the Non-significant
+            stenosis class to push the model to differentiate it.
+        nonsig_idx: 1-based class index for Non-significant stenosis.
+            Default 2 matches fine_tuning 6-class setup.
     """
     weights = torch.ones(num_classes + 1, dtype=torch.float32)
     weights[0] = 0.5       # background
     weights[1:] = 1.5      # all lesion classes
+    if boost_nonsig and nonsig_idx <= num_classes:
+        weights[nonsig_idx] = weights[nonsig_idx] * 2.0
     return weights
 
 

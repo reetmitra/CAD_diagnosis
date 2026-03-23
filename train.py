@@ -134,6 +134,8 @@ def parse_args(argv=None):
                         help='Enable class weighting for SC loss (default: True)')
     parser.add_argument('--no_sc_class_weight', action='store_true',
                         help='Disable class weighting for SC loss')
+    parser.add_argument('--boost_nonsig', action='store_true', default=False,
+                        help='Double loss weight for Non-significant stenosis class (index 2)')
 
     parser.add_argument('--focal_loss', action='store_true',
                         help='Use focal loss instead of CE for SC branch')
@@ -295,7 +297,11 @@ class Trainer:
         # Compute SC class weights if enabled
         sc_class_weights = None
         if self.args.sc_class_weight:
-            sc_class_weights = compute_sc_class_weights(self.num_classes)
+            sc_class_weights = compute_sc_class_weights(
+                num_classes=self.num_classes,
+                boost_nonsig=self.args.boost_nonsig,
+                nonsig_idx=2,
+            )
 
         fw = sc_net_framework(
             pattern=self.args.pattern,
