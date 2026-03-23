@@ -155,8 +155,8 @@ class temporal_semantic_learning(nn.Module):
             # x: [B, num_cubes, cube, cube, cube] → add channel dim
             x = rearrange(x, 'b n d h w -> (b n) 1 d h w')
         x = self._3dcnn(x)
-        x = rearrange(x, '(b n) c d h w -> b n (c d h w)', b=b, n=self.num_cubes)
-        x = self.flattening_projection.projection(x)
+        # x is now [B, num_cubes, C, D, H, W] — flattening_projection expects this format
+        x = self.flattening_projection(x)
         # Add positional encoding: x is (B, L, D)
         x = x + self.pos_embedding[:, :x.shape[1], :]
         x = self.temporal_correlation_analysis(x)
