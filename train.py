@@ -902,7 +902,7 @@ class Trainer:
         if self.args.balanced_sampling:
             print(f"  Balanced sample:  True")
         print(f"  SC class weight:  {self.args.sc_class_weight}")
-        print(f"  NonSig boost:     {args.boost_nonsig}")
+        print(f"  NonSig boost:     {self.args.boost_nonsig}")
         print(f"  Focal loss:       {self.args.focal_loss}"
               + (f" (gamma={self.args.focal_gamma})" if self.args.focal_loss else ""))
         print(f"  Num classes:      {self.num_classes}")
