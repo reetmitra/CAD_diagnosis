@@ -1070,11 +1070,15 @@ def _load_model_from_checkpoint(checkpoint_path, pattern, device, data_root=None
     )
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if 'model_state_dict' in checkpoint:
-        fw.model.load_state_dict(checkpoint['model_state_dict'])
+        incompatible = fw.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if incompatible.missing_keys:
+            print(f"    (Missing: {incompatible.missing_keys[:2]}...)")
         epoch = checkpoint.get('epoch', 'unknown')
         print(f"  Loaded {checkpoint_path} (epoch {epoch})")
     else:
-        fw.model.load_state_dict(checkpoint)
+        incompatible = fw.model.load_state_dict(checkpoint, strict=False)
+        if incompatible.missing_keys:
+            print(f"    (Missing: {incompatible.missing_keys[:2]}...)")
         print(f"  Loaded {checkpoint_path}")
     model = fw.model.to(device)
     model.eval()
