@@ -1,0 +1,163 @@
+/home/reet/development/CAD_diagnosis/.venv/lib/python3.10/site-packages/torch/nn/modules/transformer.py:379: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.self_attn.batch_first was not True(use batch_first for better inference performance)
+  warnings.warn(
+Using device: cuda
+Loaded CONSTRAINED stenosis thresholds: [2.1999999999999997, 0.35, 0.25]
+  (min Non-sig recall constraint: 0.1, val F1=0.6358)
+Loaded plaque thresholds: [1.4166666666666665, 0.7812500000000001, 1.1875]
+  (val plaque F1 baseline=0.3493, calibrated=0.5045)
+Number of classes: 6
+Loading 3 model(s) on cuda...
+    (Missing: ['sampling_point_framework.pos_embedding']...)
+  Loaded checkpoints_v7_finetune/checkpoint_epoch_29.pth (epoch 29)
+    (Missing: ['sampling_point_framework.pos_embedding']...)
+  Loaded checkpoints_v7_finetune/checkpoint_epoch_39.pth (epoch 39)
+    (Missing: ['sampling_point_framework.pos_embedding']...)
+  Loaded checkpoints_v7_finetune/checkpoint_epoch_49.pth (epoch 49)
+Using 665 files (split='all') from ./dataset/test
+Test set: 665 batches (batch_size=1)
+
+Running inference on test set with ensemble (3 models)...
+  Processed 10/665 batches
+  Processed 20/665 batches
+  Processed 30/665 batches
+  Processed 40/665 batches
+  Processed 50/665 batches
+  Processed 60/665 batches
+  Processed 70/665 batches
+  Processed 80/665 batches
+  Processed 90/665 batches
+  Processed 100/665 batches
+  Processed 110/665 batches
+  Processed 120/665 batches
+  Processed 130/665 batches
+  Processed 140/665 batches
+  Processed 150/665 batches
+  Processed 160/665 batches
+  Processed 170/665 batches
+  Processed 180/665 batches
+  Processed 190/665 batches
+  Processed 200/665 batches
+  Processed 210/665 batches
+  Processed 220/665 batches
+  Processed 230/665 batches
+  Processed 240/665 batches
+  Processed 250/665 batches
+  Processed 260/665 batches
+  Processed 270/665 batches
+  Processed 280/665 batches
+  Processed 290/665 batches
+  Processed 300/665 batches
+  Processed 310/665 batches
+  Processed 320/665 batches
+  Processed 330/665 batches
+  Processed 340/665 batches
+  Processed 350/665 batches
+  Processed 360/665 batches
+  Processed 370/665 batches
+  Processed 380/665 batches
+  Processed 390/665 batches
+  Processed 400/665 batches
+  Processed 410/665 batches
+  Processed 420/665 batches
+  Processed 430/665 batches
+  Processed 440/665 batches
+  Processed 450/665 batches
+  Processed 460/665 batches
+  Processed 470/665 batches
+  Processed 480/665 batches
+  Processed 490/665 batches
+  Processed 500/665 batches
+  Processed 510/665 batches
+  Processed 520/665 batches
+  Processed 530/665 batches
+  Processed 540/665 batches
+  Processed 550/665 batches
+  Processed 560/665 batches
+  Processed 570/665 batches
+  Processed 580/665 batches
+  Processed 590/665 batches
+  Processed 600/665 batches
+  Processed 610/665 batches
+  Processed 620/665 batches
+  Processed 630/665 batches
+  Processed 640/665 batches
+  Processed 650/665 batches
+  Processed 660/665 batches
+Evaluation complete: 665 samples
+
+[Thresholds applied] t=[2.1999999999999997, 0.35, 0.25]
+  Prediction distribution: {0: 155, 1: 387, 2: 123}
+[Plaque thresholds applied] t=[1.4166666666666665, 0.7812500000000001, 1.1875]
+  Plaque prediction distribution: {0: 336, 1: 123, 2: 8}
+======================================================================
+SC-Net Evaluation Results (Artery-Level)
+======================================================================
+
+Stenosis Degree Classification (Healthy / Non-significant / Significant):
+  ACC:         0.522
+  Precision:   0.617
+  Recall:      0.528
+  F1:          0.527
+  Specificity: 0.767
+
+  Per-class metrics:
+  Class               Precision     Recall         F1    Support
+  ----------------------------------------------------------
+  Healthy                 0.594      0.465      0.521        198
+  Non-significant         0.380      0.700      0.492        210
+  Significant             0.878      0.420      0.568        257
+
+  Confusion Matrix (rows=GT, cols=Pred):
+                             Healthy  Non-significant      Significant
+                   ---------------------------------------------------
+  Healthy                         92              106                0  | 198
+  Non-significant                 48              147               15  | 210
+  Significant                     15              134              108  | 257
+                                 155              387              123
+
+
+Plaque Composition Classification (Calcified / Non-calcified / Mixed):
+  ACC:         0.602
+  Precision:   0.431
+  Recall:      0.391
+  F1:          0.386
+  Specificity: 0.726
+
+  Per-class metrics:
+  Class               Precision     Recall         F1    Support
+  ----------------------------------------------------------
+  Calcified               0.708      0.810      0.756        294
+  Non-calcified           0.333      0.320      0.327        128
+  Mixed                   0.250      0.044      0.075         45
+
+  Confusion Matrix (rows=GT, cols=Pred):
+                       Calcified  Non-calcified          Mixed
+                 ---------------------------------------------
+  Calcified                  238             54              2  | 294
+  Non-calcified               83             41              4  | 128
+  Mixed                       15             28              2  | 45
+                             336            123              8
+
+
+Sampling Point Classification:
+  ACC:         0.277
+  Points:      184/665
+
+----------------------------------------------------------------------
+AUC-ROC (One-vs-Rest)
+----------------------------------------------------------------------
+
+  Stenosis:
+    Healthy              AUC = 0.822
+    Non-significant      AUC = 0.426
+    Significant          AUC = 0.857
+    Macro-average        AUC = 0.702
+
+  Plaque:
+    Calcified            AUC = 0.674
+    Non-calcified        AUC = 0.609
+    Mixed                AUC = 0.749
+    Macro-average        AUC = 0.677
+
+======================================================================
+Results saved to: results_v7ft_ensemble3.json

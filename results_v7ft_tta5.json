@@ -1,0 +1,86 @@
+{
+  "timestamp": "2026-03-23T13:27:00.188418",
+  "checkpoint": "checkpoints_v7_finetune/final_model.pth",
+  "pattern": "fine_tuning",
+  "tta": true,
+  "tta_k": 5,
+  "ensemble": false,
+  "num_ensemble_models": 1,
+  "stenosis_metrics": {
+    "acc": 0.5864661654135338,
+    "prec": 0.6034097075763742,
+    "recall": 0.591674948484287,
+    "f1": 0.5837841232403632,
+    "spec": 0.7981776068468346
+  },
+  "plaque_metrics": {
+    "acc": 0.5717344753747323,
+    "prec": 0.4484809049452965,
+    "recall": 0.4367217025699169,
+    "f1": 0.4384738068948595,
+    "spec": 0.7360853895684709
+  },
+  "sc_metrics": {
+    "acc": 0.2962406015037594,
+    "total_points": 665.0,
+    "correct_points": 197.0
+  },
+  "stenosis_per_class": [
+    {
+      "class": "Healthy",
+      "precision": 0.5604395604395604,
+      "recall": 0.7727272727272727,
+      "f1": 0.6496815286624203,
+      "support": 198
+    },
+    {
+      "class": "Non-significant",
+      "precision": 0.42592592592592593,
+      "recall": 0.4380952380952381,
+      "f1": 0.431924882629108,
+      "support": 210
+    },
+    {
+      "class": "Significant",
+      "precision": 0.8238636363636364,
+      "recall": 0.5642023346303502,
+      "f1": 0.6697459584295611,
+      "support": 257
+    }
+  ],
+  "plaque_per_class": [
+    {
+      "class": "Calcified",
+      "precision": 0.7266187050359713,
+      "recall": 0.6870748299319728,
+      "f1": 0.7062937062937064,
+      "support": 294
+    },
+    {
+      "class": "Non-calcified",
+      "precision": 0.36075949367088606,
+      "recall": 0.4453125,
+      "f1": 0.3986013986013986,
+      "support": 128
+    },
+    {
+      "class": "Mixed",
+      "precision": 0.25806451612903225,
+      "recall": 0.17777777777777778,
+      "f1": 0.21052631578947367,
+      "support": 45
+    }
+  ],
+  "stenosis_auc": {
+    "Healthy": 0.838600134103346,
+    "Non-significant": 0.42806907378335946,
+    "Significant": 0.8653963530937667
+  },
+  "plaque_auc": {
+    "Calcified": 0.6744524399355117,
+    "Non-calcified": 0.6466399336283185,
+    "Mixed": 0.763928383359663
+  },
+  "num_stenosis_samples": 665,
+  "num_plaque_samples": 467
+}

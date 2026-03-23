@@ -77,6 +77,8 @@ def parse_args():
     parser.add_argument('--use_constrained', action='store_true',
                         help='When --thresholds is provided, use constrained_stenosis_thresholds '
                              'instead of stenosis_thresholds (for Non-sig recall enforcement).')
+    parser.add_argument('--multi_window', action='store_true',
+                        help='Whether model expects multi-channel (multi-window) inputs.')
     return parser.parse_args()
 
 
