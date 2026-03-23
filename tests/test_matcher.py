@@ -42,8 +42,10 @@ def test_matcher_index_values_in_range():
     targets = _make_targets(sizes, C)
     indices = matcher(outputs, targets)
     for b, (src, tgt) in enumerate(indices):
-        assert src.max() < num_q,    f"Batch {b}: src index {src.max()} >= num_queries {num_q}"
-        assert tgt.max() < sizes[b], f"Batch {b}: tgt index {tgt.max()} >= n_targets {sizes[b]}"
+        if src.numel() > 0:
+            assert src.max() < num_q,    f"Batch {b}: src {src.max()} >= {num_q}"
+        if tgt.numel() > 0:
+            assert tgt.max() < sizes[b], f"Batch {b}: tgt {tgt.max()} >= {sizes[b]}"
 
 
 def test_matcher_handles_empty_batch():
@@ -57,6 +59,25 @@ def test_matcher_handles_empty_batch():
     ]
     indices = matcher(outputs, targets)
     assert len(indices) == bs
+    empty_src, empty_tgt = indices[0]
+    assert empty_src.numel() == 0
+    assert empty_tgt.numel() == 0
+
+
+def test_matcher_all_empty_targets():
+    """When all targets are empty, matcher returns bs pairs of empty tensors."""
+    bs, num_q, C = 2, 16, 3
+    matcher = HungarianMatcher()
+    outputs = _make_outputs(bs, num_q, C)
+    targets = [
+        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 4)},
+        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 4)},
+    ]
+    indices = matcher(outputs, targets)
+    assert len(indices) == bs
+    for src, tgt in indices:
+        assert src.numel() == 0
+        assert tgt.numel() == 0
 
 
 def test_matcher_bs1():
