@@ -1,0 +1,48 @@
+{
+  "stenosis_thresholds": [
+    1.579591836734694,
+    1.0,
+    0.8785714285714286
+  ],
+  "stenosis_class_names": [
+    "Healthy",
+    "Non-significant",
+    "Significant"
+  ],
+  "val_macro_f1_baseline": 0.5994759006991424,
+  "val_macro_f1_calibrated": 0.6697107673280205,
+  "val_prediction_distribution": {
+    "Healthy": 131,
+    "Non-significant": 136,
+    "Significant": 177
+  },
+  "val_calibrated_metrics": {
+    "acc": 0.6711711711711712,
+    "prec": 0.6624535849618236,
+    "recall": 0.6850449842555105,
+    "f1": 0.6697107673280205,
+    "spec": 0.8335388748675322
+  },
+  "checkpoint": "checkpoints_v9_finetune/best_model.pth",
+  "pattern": "fine_tuning",
+  "grid_steps": 50,
+  "plaque_thresholds": [
+    0.7291666666666666,
+    0.45625,
+    0.45625
+  ],
+  "plaque_class_names": [
+    "Calcified",
+    "Non-calcified",
+    "Mixed"
+  ],
+  "val_plaque_macro_f1_baseline": 0.4338954683226141,
+  "val_plaque_macro_f1_calibrated": 0.5373292135979958,
+  "constrained_stenosis_thresholds": [
+    1.8,
+    1.15,
+    1.0
+  ],
+  "constrained_val_macro_f1": 0.6732688081051222,
+  "constrain_nonsig_recall": 0.1
+}
