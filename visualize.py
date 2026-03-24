@@ -615,13 +615,19 @@ def render_artery(artery_id, volume, labels, save_path,
         ax_long2 = fig.add_subplot(gs[1, :])
         cs_row   = 2
     else:
-        fig = plt.figure(figsize=(max(14, n_cs * 4), 8))
-        gs  = fig.add_gridspec(4, n_cs,
-                               height_ratios=[3, 0.3, 0.3, 2],
-                               hspace=0.4, wspace=0.3)
+        # Single-model mode: 2x2 grid for bars (GT/Pred × Stenosis/Plaque) + cross-sections
+        # Use max(n_cs, 2) columns so bars can span and cross-sections have space
+        n_cols = max(n_cs, 2)
+        fig = plt.figure(figsize=(max(16, n_cols * 4), 9))
+        gs  = fig.add_gridspec(4, n_cols, height_ratios=[3, 0.4, 0.4, 2],
+                               hspace=0.35, wspace=0.25)
         ax_long    = fig.add_subplot(gs[0, :])
-        ax_gt_bar  = fig.add_subplot(gs[1, :])
-        ax_pred_bar  = fig.add_subplot(gs[2, :])
+        # Bars: split columns in half for GT/Pred side-by-side
+        half_col = n_cols // 2
+        ax_gt_sten = fig.add_subplot(gs[1, :half_col])
+        ax_pred_sten = fig.add_subplot(gs[1, half_col:])
+        ax_gt_plaq = fig.add_subplot(gs[2, :half_col])
+        ax_pred_plaq = fig.add_subplot(gs[2, half_col:])
         ax_long2   = None
         cs_row     = 3
 
@@ -732,6 +738,50 @@ def render_artery(artery_id, volume, labels, save_path,
 
         return tp_count, fn_count, fp_count, pred_intervals_out
 
+    def _extract_per_slice_predictions(od_outputs, num_classes, D, conf_thresh=0.15):
+        """Extract per-slice stenosis and plaque predictions from OD outputs.
+
+        Returns:
+            sten_pred: np.ndarray shape (D,), stenosis class 0-2 per slice (0=no pred)
+            plaq_pred: np.ndarray shape (D,), plaque class 0-3 per slice (0=no pred)
+        """
+        if od_outputs is None:
+            return np.zeros(D, dtype=int), np.zeros(D, dtype=int)
+
+        pred_logits = od_outputs['pred_logits']   # [Q, C+1]
+        pred_boxes  = od_outputs['pred_boxes']    # [Q, 2]
+
+        sten_pred = np.zeros(D, dtype=int)
+        plaq_pred = np.zeros(D, dtype=int)
+
+        probs = torch.nn.functional.softmax(pred_logits, dim=-1)  # [Q, C+1]
+        pred_classes = torch.argmax(probs, dim=-1)   # [Q]
+
+        for q in range(pred_logits.shape[0]):
+            cls = pred_classes[q].item()
+            if cls >= num_classes:  # no-object class
+                continue
+            fg_prob = probs[q, cls].item()
+            no_obj_prob = probs[q, num_classes].item()
+            if fg_prob <= no_obj_prob or fg_prob < conf_thresh:
+                continue
+            # Get box position
+            cx = pred_boxes[q, 0].item()
+            w  = pred_boxes[q, 1].item()
+            x0 = cx - w / 2.0
+            x1 = cx + w / 2.0
+            start = max(0, int(x0 * D))
+            end   = min(D, math.ceil(x1 * D))
+            # Decode class: cls 0-5 in 6-class mode
+            # class 1-3 = nonsig+{calc,noncalc,mixed}, 4-6 = sig+{calc,noncalc,mixed}
+            sten_class = 2 if cls >= 3 else 1
+            plaq_class = (cls % 3) + 1
+            # Fill slices (higher confidence predictions overwrite)
+            sten_pred[start:end] = sten_class
+            plaq_pred[start:end] = plaq_class
+
+        return sten_pred, plaq_pred
+
     def _draw_semantic_bar(ax_bar, labels_1d, colour_map, label_text):
         """Render a semantic label bar where each pixel column is coloured by its class.
 
@@ -779,12 +829,17 @@ def render_artery(artery_id, volume, labels, save_path,
 
     # ── Label bars (single-model mode only) ─────────────────────────────────
     if not comparison_mode:
-        # Derive stenosis and plaque from combined labels
-        sten_per_slice = np.where(labels == 0, 0, np.where(labels >= 4, 2, 1))
-        plaq_per_slice = np.where(labels == 0, 0, ((labels - 1) % 3) + 1)
-        # Draw semantic bars
-        _draw_semantic_bar(ax_gt_bar, sten_per_slice, STEN_BAR_COLOURS, 'Stenosis')
-        _draw_semantic_bar(ax_pred_bar, plaq_per_slice, PLAQ_BAR_COLOURS, 'Plaque')
+        # Derive GT stenosis and plaque from combined labels
+        sten_gt_slice = np.where(labels == 0, 0, np.where(labels >= 4, 2, 1))
+        plaq_gt_slice = np.where(labels == 0, 0, ((labels - 1) % 3) + 1)
+        # Extract predicted stenosis and plaque from OD outputs
+        sten_pred_slice, plaq_pred_slice = _extract_per_slice_predictions(
+            od_outputs, num_classes, D, conf_thresh=0.15)
+        # Draw 2x2 grid: GT/Pred × Stenosis/Plaque
+        _draw_semantic_bar(ax_gt_sten, sten_gt_slice, STEN_BAR_COLOURS, 'GT Stenosis')
+        _draw_semantic_bar(ax_pred_sten, sten_pred_slice, STEN_BAR_COLOURS, 'Pred Stenosis')
+        _draw_semantic_bar(ax_gt_plaq, plaq_gt_slice, PLAQ_BAR_COLOURS, 'GT Plaque')
+        _draw_semantic_bar(ax_pred_plaq, plaq_pred_slice, PLAQ_BAR_COLOURS, 'Pred Plaque')
 
     # ── Figure suptitle ────────────────────────────────────────────────────
     if comparison_mode:
