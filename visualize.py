@@ -80,6 +80,12 @@ PRED_COLOURS = {
     2: '#FF0000',   # red    — predicted Significant
 }
 
+# Semantic bar colours for stenosis (Healthy/Non-sig/Significant)
+STEN_BAR_COLOURS = {0: '#CCCCCC', 1: '#FFD700', 2: '#FF0000'}
+
+# Semantic bar colours for plaque type (Calcified/Non-calcified/Mixed)
+PLAQ_BAR_COLOURS = {0: '#000000', 1: '#2196F3', 2: '#4CAF50', 3: '#9C27B0'}
+
 # HU windowing (must match training: window=[300, 900])
 HU_MIN = 300 - 900 / 2   # = -150
 HU_MAX = 300 + 900 / 2   # =  750
@@ -358,10 +364,10 @@ def main():
     comparison_mode = model2 is not None
 
     saved = 0
-    for vol_path, lbl_path, artery_id in pairs:
+    for vol_path, sten_path, plaq_path, comb_path, artery_id in pairs:
         if args.max_samples > 0 and saved >= args.max_samples:
             break
-        vol, labels = load_volume_and_labels(vol_path, lbl_path)
+        vol, labels = load_volume_and_labels(vol_path, sten_path, plaq_path, comb_path)
 
         stenosis_pred, plaque_pred = None, None
         od_outputs = None
@@ -435,17 +441,58 @@ def main():
         print(f"  Filter '{args.filter}' was active — totals reflect filtered count only.")
 
 
+def _build_viz_file_pairs(vol_dir, lbl_dir):
+    """Build (vol_path, sten_path_or_None, plaq_path_or_None, comb_path_or_None, artery_id) tuples.
+
+    Matches volumes to labels by stem name. Prefers new .nii.gz + separate label format.
+    """
+    lbl_set = set(os.listdir(lbl_dir))
+    pairs = []
+    seen_stems = set()
+    for vf in sorted(os.listdir(vol_dir)):
+        if vf.endswith('.nii.gz'):
+            stem = vf[:-7]
+        elif vf.endswith('.nii'):
+            stem = vf[:-4]
+        else:
+            continue
+        if stem in seen_stems:
+            continue
+        seen_stems.add(stem)
+        sten_f = stem + '_stenosis.txt'
+        plaq_f = stem + '_plaque.txt'
+        comb_f = stem + '.txt'
+        # Prefer new format: .nii.gz with separate stenosis/plaque labels
+        if vf.endswith('.nii.gz') and sten_f in lbl_set and plaq_f in lbl_set:
+            pairs.append((
+                os.path.join(vol_dir, vf),
+                os.path.join(lbl_dir, sten_f),
+                os.path.join(lbl_dir, plaq_f),
+                None,
+                stem,
+            ))
+        elif comb_f in lbl_set:
+            # Fall back to old format: .nii with combined label
+            old_vf = stem + '.nii'
+            vol_path_candidate = os.path.join(vol_dir, old_vf)
+            if os.path.exists(vol_path_candidate):
+                vol_path = vol_path_candidate
+            else:
+                vol_path = os.path.join(vol_dir, vf)
+            pairs.append((vol_path, None, None, os.path.join(lbl_dir, comb_f), stem))
+    return pairs
+
+
 def get_file_pairs(data_root, pattern):
-    """Return sorted list of (vol_path, lbl_path, artery_id) for the given split.
+    """Return sorted list of (vol_path, sten_path, plaq_path, comb_path, artery_id) for the given split.
 
     Uses the same deterministic sort + train_ratio split as cubic_sequence_data
     (train_ratio=0.8) so indices are consistent with training/eval.
     """
     vol_dir = os.path.join(data_root, 'volumes')
     lbl_dir = os.path.join(data_root, 'labels')
-    vol_files = sorted(os.listdir(vol_dir))
-    lbl_files = sorted(os.listdir(lbl_dir))
-    n = len(vol_files)
+    all_pairs = _build_viz_file_pairs(vol_dir, lbl_dir)
+    n = len(all_pairs)
     train_ratio = 0.8
 
     if pattern == 'all':
@@ -461,31 +508,47 @@ def get_file_pairs(data_root, pattern):
         start = int(n * (train_ratio + (1 - train_ratio) / 2))
         end = n
 
-    pairs = []
-    for i in range(start, end):
-        vf = vol_files[i]
-        lf = lbl_files[i]
-        artery_id = os.path.splitext(vf)[0]   # strip .nii
-        pairs.append((
-            os.path.join(vol_dir, vf),
-            os.path.join(lbl_dir, lf),
-            artery_id,
-        ))
-    return pairs
+    return all_pairs[start:end]
 
 
-def load_volume_and_labels(vol_path, lbl_path):
-    """Load a CPR NIfTI volume and its per-slice label file.
+def load_volume_and_labels(vol_path, sten_path=None, plaq_path=None, comb_path=None):
+    """Load a CPR NIfTI volume and labels (new or old format).
+
+    Handles both:
+      - Old format: combined label in one file
+      - New format: separate stenosis and plaque labels
 
     Returns:
         volume: np.ndarray shape (256, 64, 64), raw HU values
         labels: np.ndarray shape (256,), int32, raw label values 0-6
     """
+    from scipy.ndimage import zoom
+
+    # Load volume
     img = nib.load(vol_path)
-    vol = img.get_fdata()                 # may be (64, 64, 256) or (256, 64, 64)
-    if vol.shape[0] == vol.shape[1]:      # (64, 64, 256) → transpose to (256, 64, 64)
+    vol = img.get_fdata()                 # may be (64, 64, 256) or (256, 64, 64) or (95,95,N)
+    if vol.shape[0] == vol.shape[1]:      # (H, W, D) → transpose to (D, H, W)
         vol = vol.transpose(2, 0, 1)
-    labels = np.loadtxt(lbl_path).astype(np.int32)
+
+    # Resize volume to (256, 64, 64) if needed
+    target_shape = (256, 64, 64)
+    if list(vol.shape) != target_shape:
+        zf = [target_shape[i] / vol.shape[i] for i in range(3)]
+        vol = zoom(vol, zf, order=1)
+
+    # Load labels
+    if comb_path is not None:
+        labels = np.loadtxt(comb_path).astype(np.int32)
+    else:
+        from augmentation import merge_new_labels
+        sten = np.loadtxt(sten_path).astype(np.int32)
+        plaq = np.loadtxt(plaq_path).astype(np.int32)
+        labels = merge_new_labels(sten, plaq)
+
+    # Resize labels to match vessel axis length
+    if len(labels) != target_shape[0]:
+        labels = zoom(labels.astype(float), target_shape[0] / len(labels), order=0).astype(np.int32)
+
     return vol, labels
 
 
@@ -530,7 +593,8 @@ def render_artery(artery_id, volume, labels, save_path,
     sten_gt  = _sten_gt_from_labels(labels)
 
     # ── Longitudinal strip: centre cross-section row across all z ──────────
-    strip = volume[:, 32, :].T   # (64, 256) — x=vessel axis
+    cy = volume.shape[1] // 2   # center row of cross-section
+    strip = volume[:, cy, :].T   # (cross_section_width, 256) — x=vessel axis
     strip_norm = normalize_ct_data(strip, hu_min=HU_MIN, hu_max=HU_MAX)
 
     # ── Cross-section positions: centre of each labelled segment ───────────
@@ -668,8 +732,30 @@ def render_artery(artery_id, volume, labels, save_path,
 
         return tp_count, fn_count, fp_count, pred_intervals_out
 
+    def _draw_semantic_bar(ax_bar, labels_1d, colour_map, label_text):
+        """Render a semantic label bar where each pixel column is coloured by its class.
+
+        labels_1d: np.ndarray shape (D,), int; class indices
+        colour_map: dict mapping class index → hex colour
+        label_text: short string shown on y-axis tick (e.g. 'Stenosis' or 'Plaque')
+        """
+        import matplotlib.colors as mcolors
+        # Create RGB image: shape (1, D, 3)
+        D = len(labels_1d)
+        bar_rgb = np.zeros((1, D, 3))
+        for i, lbl in enumerate(labels_1d):
+            hex_color = colour_map.get(lbl, '#808080')  # default grey
+            rgb = mcolors.hex2color(hex_color)
+            bar_rgb[0, i, :] = rgb
+        ax_bar.imshow(bar_rgb, aspect='auto', origin='upper')
+        ax_bar.set_xticks([])
+        ax_bar.set_yticks([0])
+        ax_bar.set_yticklabels([label_text], fontsize=7)
+        for spine in ax_bar.spines.values():
+            spine.set_visible(False)
+
     def _draw_label_bar(ax_bar, coverage_1d, label_text):
-        """Render a thin 1×D horizontal label bar.
+        """Render a thin 1×D horizontal label bar (binary: black/red).
 
         coverage_1d: np.ndarray shape (D,), int; 0=normal(black), 1=abnormal(red)
         label_text:  short string shown on y-axis tick ('GT' or 'Pred')
@@ -693,14 +779,12 @@ def render_artery(artery_id, volume, labels, save_path,
 
     # ── Label bars (single-model mode only) ─────────────────────────────────
     if not comparison_mode:
-        gt_coverage = (labels > 0).astype(int)   # shape (D,)
-        _draw_label_bar(ax_gt_bar, gt_coverage, 'GT')
-        pred_coverage = np.zeros(D, dtype=int)
-        for x0_norm, x1_norm in pred_ivs:
-            start = max(0, int(x0_norm * D))
-            end   = min(D, math.ceil(x1_norm * D))
-            pred_coverage[start:end] = 1
-        _draw_label_bar(ax_pred_bar, pred_coverage, 'Pred')
+        # Derive stenosis and plaque from combined labels
+        sten_per_slice = np.where(labels == 0, 0, np.where(labels >= 4, 2, 1))
+        plaq_per_slice = np.where(labels == 0, 0, ((labels - 1) % 3) + 1)
+        # Draw semantic bars
+        _draw_semantic_bar(ax_gt_bar, sten_per_slice, STEN_BAR_COLOURS, 'Stenosis')
+        _draw_semantic_bar(ax_pred_bar, plaq_per_slice, PLAQ_BAR_COLOURS, 'Plaque')
 
     # ── Figure suptitle ────────────────────────────────────────────────────
     if comparison_mode:

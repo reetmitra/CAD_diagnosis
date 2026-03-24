@@ -192,6 +192,62 @@ def online_augment(volume, labels):
     return volume, labels
 
 
+def merge_new_labels(stenosis, plaque):
+    """Merge separate stenosis (0-4) and plaque (0-3) arrays into combined (0-6).
+
+    Maps:
+      stenosis in {1,2} + plaque in {1,2,3} → combined in {1,2,3}
+      stenosis in {3,4} + plaque in {1,2,3} → combined in {4,5,6}
+    """
+    combined = np.zeros_like(stenosis)
+    nonsig = (stenosis >= 1) & (stenosis <= 2)
+    sig    = stenosis >= 3
+    combined[nonsig] = plaque[nonsig]      # 1, 2, or 3
+    combined[sig]    = plaque[sig] + 3     # 4, 5, or 6
+    return combined
+
+
+def _build_file_pairs(volumes_root, labels_root):
+    """Build (vol_path, sten_path_or_None, plaq_path_or_None, comb_path_or_None) tuples.
+
+    Matches volumes to labels by stem name. Prefers new .nii.gz + separate label format.
+    """
+    lbl_set = set(os.listdir(labels_root))
+    pairs = []
+    seen_stems = set()
+    for vf in sorted(os.listdir(volumes_root)):
+        if vf.endswith('.nii.gz'):
+            stem = vf[:-7]
+        elif vf.endswith('.nii'):
+            stem = vf[:-4]
+        else:
+            continue
+        if stem in seen_stems:
+            continue
+        seen_stems.add(stem)
+        sten_f = stem + '_stenosis.txt'
+        plaq_f = stem + '_plaque.txt'
+        comb_f = stem + '.txt'
+        # Prefer new format: .nii.gz with separate stenosis/plaque labels
+        if vf.endswith('.nii.gz') and sten_f in lbl_set and plaq_f in lbl_set:
+            pairs.append((
+                os.path.join(volumes_root, vf),
+                os.path.join(labels_root, sten_f),
+                os.path.join(labels_root, plaq_f),
+                None,
+            ))
+        elif comb_f in lbl_set:
+            # Fall back to old format: .nii with combined label
+            old_vf = stem + '.nii'
+            vol_path_candidate = os.path.join(volumes_root, old_vf)
+            if os.path.exists(vol_path_candidate):
+                vol_path = vol_path_candidate
+            else:
+                vol_path = os.path.join(volumes_root, vf)
+            pairs.append((vol_path, None, None, os.path.join(labels_root, comb_f)))
+    return pairs
+
+
 class cubic_sequence_data(data.Dataset):
     def __init__(self, dataset_root, pattern='training', train_ratio=0.8, input_shape=[256,64,64], window=[300, 900], augment=False, num_classes=None, file_indices=None, multi_window=False):
 
@@ -208,11 +264,9 @@ class cubic_sequence_data(data.Dataset):
         self.pattern = pattern
         self.num_classes = num_classes
 
-        self.volumes_file_list = os.listdir(self.volumes_root)
-        self.volumes_file_list = sorted(self.volumes_file_list)
-        self.labels_file_list = os.listdir(self.labels_root)
-        self.labels_file_list = sorted(self.labels_file_list)
-        self.file_total = len(self.volumes_file_list)
+        # Build matched (vol, sten, plaq, comb) pairs instead of separate lists
+        self.file_pairs = _build_file_pairs(self.volumes_root, self.labels_root)
+        self.file_total = len(self.file_pairs)
 
         # file_indices overrides the default train_ratio-based split
         self.file_indices = file_indices
@@ -238,16 +292,40 @@ class cubic_sequence_data(data.Dataset):
             self.length = self.data_end - self.data_start
         return
 
-    def read_data(self, volumes_file, labels_file):
+    def read_data(self, vol_path, sten_path, plaq_path, comb_path):
+        """Load volume and labels, handling both new (separate) and old (combined) formats.
 
-        nii_file = nib.load(volumes_file)
-        ret_volumes = nii_file.get_fdata()
-        if ret_volumes.shape[0] == ret_volumes.shape[1]:
-            ret_volumes = ret_volumes.transpose(2, 0, 1)
-        ret_volumes = np.array(ret_volumes)
-        ret_labels = np.loadtxt(labels_file).astype(np.int32)
+        Args:
+            vol_path: path to volume (.nii or .nii.gz)
+            sten_path: path to stenosis label or None
+            plaq_path: path to plaque label or None
+            comb_path: path to combined label or None
+        """
+        # Load volume
+        nii_file = nib.load(vol_path)
+        vol = nii_file.get_fdata()
+        if vol.shape[0] == vol.shape[1]:  # (H, W, D) → (D, H, W)
+            vol = vol.transpose(2, 0, 1)
 
-        return ret_volumes, ret_labels
+        # Resize volume to input_shape if needed
+        target = self.input_shape
+        if list(vol.shape) != target:
+            zf = [target[i] / vol.shape[i] for i in range(3)]
+            vol = zoom(vol, zf, order=1)
+
+        # Load labels
+        if comb_path is not None:
+            labels = np.loadtxt(comb_path).astype(np.int32)
+        else:
+            sten = np.loadtxt(sten_path).astype(np.int32)
+            plaq = np.loadtxt(plaq_path).astype(np.int32)
+            labels = merge_new_labels(sten, plaq)
+
+        # Resize labels to match vessel axis length
+        if len(labels) != target[0]:
+            labels = zoom(labels.astype(float), target[0] / len(labels), order=0).astype(np.int32)
+
+        return np.array(vol), labels
 
     def detection_targets(self, labels_data):
 
@@ -297,9 +375,8 @@ class cubic_sequence_data(data.Dataset):
             actual_index = self.file_indices[index]
         else:
             actual_index = index + self.data_start
-        volumes_file = os.path.join(self.volumes_root, self.volumes_file_list[actual_index])
-        labels_file = os.path.join(self.labels_root, self.labels_file_list[actual_index])
-        ret_volumes, ret_labels = self.read_data(volumes_file, labels_file)
+        vol_path, sten_path, plaq_path, comb_path = self.file_pairs[actual_index]
+        ret_volumes, ret_labels = self.read_data(vol_path, sten_path, plaq_path, comb_path)
         if self.augment and self.pattern == 'training':
             ret_volumes, ret_labels = online_augment(ret_volumes, ret_labels)
         # Remap labels when num_classes < max label (e.g. pre_training 3-class on 6-class data)
