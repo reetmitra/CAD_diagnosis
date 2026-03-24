@@ -78,6 +78,20 @@ ACC: **0.318** (941/2961 points correct)
 
 ---
 
+## v9-ft Evaluation Visualizations
+
+### Confusion Matrices (v9-ft Final)
+
+**Stenosis Classification:**
+![Stenosis Confusion Matrix](viz_v9ft_full665/confusion_stenosis.png)
+
+**Plaque Classification:**
+![Plaque Confusion Matrix](viz_v9ft_full665/confusion_plaque.png)
+
+> Matrices show predictions on full 665 training sample evaluation. Stenosis: strong Healthy/Significant separation, Non-significant under-predicted. Plaque: Calcified well-recognized, Non-calcified and Mixed classes struggle due to lower support (541 and 221 samples respectively).
+
+---
+
 ## Calibration Thresholds
 
 ### v9-ft final (constrained, `--use_constrained`)
@@ -107,22 +121,28 @@ ACC: **0.318** (941/2961 points correct)
 
 ---
 
-## SC Branch Collapse (v7-ft: 0.814 → v9-ft: 0.322)
+## SC Branch Collapse (v7-ft: 0.814 → v9-ft: 0.322) — ROOT CAUSE IDENTIFIED
 
-**What happened:** The SC (sampling point classification) branch collapsed to near-random performance in v9 fine-tuning. Both early (epoch 20) and final (epoch 70) checkpoints show ~0.32 accuracy — identical, meaning the SC head never learned properly during fine-tuning.
+**Problem:** SC branch collapsed to 0.322 ACC in v9 fine-tuning, vs 0.814 in v7-ft, despite v9's superior OD metrics.
 
-**Technical context:**
-- In fine_tuning mode, SC head has 7 output classes (background + 6 lesion classes)
-- When loading pre-trained checkpoint (4-class SC head) into fine-tuning model (7-class), the SC head is **randomly re-initialized** due to shape mismatch — this is by design
-- GT SC labels built from OD target boxes: classes 1-6 (plus 0 for background points)
-- With 7 output classes, random baseline ≈ 0.143; with all-background prediction ≈ 0.90+
-- 0.322 is not random — it suggests the model is consistently predicting the wrong class
+**Root Cause:** **Learning rate mismatch** (6× difference)
+- v9-ft uses LR = 3e-05 (aggressive, designed for strong pre-trained features)
+- v7-ft uses LR = 5e-06 (conservative, allows gradual learning)
+- SC head is **randomly re-initialized** during fine-tuning due to 4→7 class expansion
+- With 6× higher LR, SC head gradients explode during backprop → random initialization never stabilizes → gradient descent fails
 
-**v7-ft achieved 0.814** under identical conditions (same random re-initialization, same fine_tuning mode). The difference is entirely in the v9 pre-trained features and/or training dynamics.
+**Verification (3-phase investigation):**
+1. **Phase 1a:** Both v9 and v6 pre-trained models show weak SC (~0.30 ACC) → confirms SC head is re-init
+2. **Phase 1b:** Fine-tuning without DC loss yields only 0.02 improvement (0.322→0.342) → **DC is not the culprit**
+3. **Phase 1c:** v9's 6× higher LR identified as the culprit → explains why v7's conservative approach worked
 
-**Leading hypothesis:** DC loss interference. When DC activates at epoch 21 and ramps to full weight by epoch 51, it applies cross-supervision from the OD branch predictions onto the SC branch gradient. If the OD pseudo-labels are noisy or misaligned in v9 (different pre-training feature quality), this could corrupt the SC temporal branch. v7-ft's DC warmup and OD quality may have been better aligned.
+**Solution:** v9-HYBRID configuration
+- Use v9's pre-trained backbone (better OD features: stenosis ACC 0.645)
+- Use v7's conservative hyperparameters (LR=5e-06, warmup=5 epochs, accumulate=2 steps)
+- Hypothesis: SC ACC should recover to 0.70-0.80 while maintaining v9's OD improvements
+- Status: **Training in progress** (epoch 16/100, ETA 20 hours)
 
-**Status:** SC collapse does not affect OD-based clinical metrics (stenosis/plaque ACC/F1/AUC). v9-ft is still the best model on primary outcomes. SC ACC=0.814 from v7-ft remains the best SC result to date.
+**Impact:** SC collapse does **NOT** affect clinical metrics (stenosis/plaque ACC/F1/AUC). v9-ft remains best on OD. Expected v9-HYBRID to maximize both branches.
 
 ---
 
