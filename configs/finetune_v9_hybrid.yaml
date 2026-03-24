@@ -1,0 +1,66 @@
+# SC-Net v9 HYBRID fine-tuning configuration
+# Combines v9's strong pre-trained OD features with v7's conservative SC learning
+#
+# Key changes from v9:
+#   - Learning rate: 5e-06 (from v7, was 3e-05) — prevents SC head from drowning
+#   - Warmup: 5 epochs (from v7, was 10) — faster training
+#   - Accum steps: 2 (from v7, was 4) — faster weight updates
+#   - DC confidence: 0.7 (from v7, was 0.3) — more reliable pseudo-labels
+#   - DC warmup ramp: 20 (from v7, was 30) — faster DC activation
+#   - Distributed: True — 2-GPU training for stable gradients
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 100
+lr: 5.0e-6
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 5
+
+# L_dc warm-up: hold for 20 epochs, then ramp over 20 epochs (v7 style)
+dc_warmup_hold: 20
+dc_warmup_ramp: 20
+delta: 1.0
+dc_confidence_threshold: 0.7
+soft_dc: true
+label_smoothing: 0.1
+
+# Early stopping (v9 style — more patient)
+patience: 50
+min_delta: 0.001
+
+# Class imbalance handling
+balanced_sampling: true
+sc_class_weight: true
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.15
+
+# Effective batch = 2 GPUs * 1 batch * 2 accum = 4 (conservative for SC learning)
+accumulate_steps: 2
+
+# Training infrastructure
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 4
+seed: 42
+patient_split: true
+split_seed: 42
+
+# Transformer architecture
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging and checkpoints
+checkpoint_dir: ./checkpoints_v9_hybrid
+save_every: 10
+print_every: 1
+log_dir: ./runs_v9_hybrid
+log_every: 10
