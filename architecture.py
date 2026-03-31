@@ -147,20 +147,29 @@ class temporal_semantic_learning(nn.Module):
             b, ch, n_d, n_h, n_w = img.shape
             x = funcs._3d_cubes_selection(img, cube_size=self.cube_size, num_cubes=self.num_cubes, step=self.cubes_step, batch_size=b)
             # x: [B, num_cubes, C, cube, cube, cube]
-            x = rearrange(x, 'b n c d h w -> (b n) c d h w')
+            # Process each channel through _3dcnn independently, then average features.
+            # Conv3d expects [B, L, D, H, W] (single-channel sequence), so we slice per channel.
+            channel_features = []
+            for c in range(ch):
+                xc = x[:, :, c, :, :, :]  # [B, num_cubes, cube, cube, cube]
+                xc = self._3dcnn(xc)       # [B, num_cubes, C_out, d', h', w']
+                channel_features.append(xc)
+            x = torch.stack(channel_features, dim=2).mean(dim=2)  # [B, num_cubes, C_out, d', h', w']
         else:
             # Single-channel: [B, D, H, W]
             b = img.shape[0]
             x = funcs._3d_cubes_selection(img, cube_size=self.cube_size, num_cubes=self.num_cubes, step=self.cubes_step, batch_size=b)
-            # x: [B, num_cubes, cube, cube, cube] → add channel dim
-            x = rearrange(x, 'b n d h w -> (b n) 1 d h w')
-        x = self._3dcnn(x)
-        # x is now [B, num_cubes, C, D, H, W] — flattening_projection expects this format
-        x = self.flattening_projection(x)
-        # Add positional encoding: x is (B, L, D)
-        x = x + self.pos_embedding[:, :x.shape[1], :]
-        x = self.temporal_correlation_analysis(x)
-        x = self.softmax_classify(x, self.pattern)
+            # x: [B, num_cubes, cube, cube, cube]
+            # Pass the full [B, num_cubes, D, H, W] tensor to Conv3d so it processes ALL cubes
+            # as a sequence and returns [B, num_cubes, C_out, d', h', w'].  The temporal
+            # transformer then attends across all num_cubes=32 positions simultaneously.
+            x = self._3dcnn(x)  # [B, num_cubes, C_out, d', h', w']
+        # x: [B, num_cubes, C_out, d', h', w']
+        x = self.flattening_projection(x)       # [B, num_cubes, 512]
+        # Add positional encoding before temporal self-attention
+        x = x + self.pos_embedding[:, :x.shape[1], :]  # [B, num_cubes, 512]
+        x = self.temporal_correlation_analysis(x)      # [B, num_cubes, 512]  (cross-cube attention)
+        x = self.softmax_classify(x, self.pattern)     # [B, num_cubes, num_classes]
         return x
 
 

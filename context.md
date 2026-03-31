@@ -396,6 +396,44 @@ The original paper code also silently skips loading layers with shape mismatches
 
 ---
 
+## Improvements Implemented (2026-03-31)
+
+### Critical Architecture Fix: Temporal Branch (architecture.py)
+**Bug**: `temporal_semantic_learning.forward()` passed cubes as `[(B*n_cubes), 1, D, H, W]` to `_3dcnn`, making `l=1` inside `Conv3d.forward()`. The temporal transformer thus processed sequences of length 1 — effectively disabled. The model worked as a bag-of-independent-cubes classifier despite having a transformer.
+
+**Fix**: Pass `[B, n_cubes, D, H, W]` directly to `_3dcnn`. `Conv3d.forward()` was already designed for this input — it rearranges to `[(B*n), 1, D, H, W]`, applies conv layers, and reshapes back to `[B, n, C_out, d', h', w']`. The temporal transformer now correctly attends across all 32 cube positions.
+
+**Impact**: Temporal branch goes from bag-of-cubes to full sequence-level attention. Every existing checkpoint is compatible (parameter shapes unchanged), but temporal branch quality will differ in inference until retrained.
+
+### Eval Split Bug Fixed (train.py + framework.py)
+`Trainer.setup_data()` used `pattern='eval'` which maps to the **test split** (last 15%), not validation. This meant early stopping was inadvertently monitored on test data. Fixed:
+- `framework.py`: `self.eval_indices = val_idx` (alias for `val_indices`)
+- `train.py`: changed `pattern='eval'` → `pattern='validation'`
+
+### Balanced Sampling Bug Fixed (train.py)
+`_compute_sample_weights()` used `dataset.labels_file_list` (deleted old API). Fixed to use `dataset.file_pairs` (current API) with `merge_new_labels` for new-format datasets.
+
+### build_param_groups Fixed (scheduler_utils.py)
+The keyword patterns did not match actual SC-Net parameter names:
+- `temporal_correlation_analysis` (transformer encoder) was getting 0.1× backbone LR instead of 0.5× transformer LR
+- `query_pos` (learnable queries) was getting backbone LR
+Updated keywords to match actual dotted parameter names from `model.named_parameters()`.
+
+### Ordinal EMD Loss (optimization.py + train.py + framework.py)
+New `OrdinalEMDLoss` class: Earth Mover's Distance over cumulative class distributions. Penalises Healthy↔Significant errors ~2× more than Healthy↔Non-significant (proportional to ordinal distance). Controlled via `--ordinal_weight` (0=disabled, 0.3-0.5 recommended). Wired through `sampling_point_classification_loss` → `spatio_temporal_contrast_loss` → `framework`.
+
+### Cosine Warm Restarts LR Schedule (scheduler_utils.py + train.py)
+New `CosineAnnealingWarmRestarts` class (wraps PyTorch's). Enables periodic LR restarts to escape local minima during long training. Use `--lr_schedule cosine_warm_restarts --lr_t0 60 --lr_t_mult 2`. Default still `cosine` (backward compatible).
+
+### Stochastic Weight Averaging (train.py)
+New `--swa` flag using `torch.optim.swa_utils.AveragedModel`. Starts averaging from `--swa_start_epoch` (default: epochs//2) with `SWALR` scheduler. BatchNorm statistics updated at end of training. Saves `swa_model.pth` alongside `final_model.pth`. SWA finds flatter minima and generalises better, especially effective under limited data.
+
+### Updated Configs
+- `configs/finetune_v9.yaml`: 250 epochs, cosine warm restarts (T0=60), SWA from ep120, ordinal_weight=0.5, boost_nonsig=true
+- `configs/finetune_v9_nonsig.yaml`: 200 epochs, standard cosine, ordinal_weight=0.3, conservative parallel run
+
+---
+
 ## Pending Next Steps
 
 ### Completed: Constrained calibration (2026-03-02)

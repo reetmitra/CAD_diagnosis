@@ -25,7 +25,7 @@ class sc_net_framework:
                  patient_split=False, split_seed=42,
                  temporal_encoder_layers=None, temporal_heads=None,
                  spatial_encoder_layers=None, spatial_decoder_layers=None,
-                 multi_window=False):
+                 multi_window=False, ordinal_weight=0.0):
 
         if pattern == "pre_training":
             self.model_pattern = "training"
@@ -58,6 +58,7 @@ class sc_net_framework:
         self._spatial_encoder_layers = spatial_encoder_layers
         self._spatial_decoder_layers = spatial_decoder_layers
         self._multi_window = multi_window
+        self._ordinal_weight = ordinal_weight
         self.in_channels = 3 if multi_window else opt.net_params["in_channels"]
 
         self.model = self.get_model()
@@ -87,7 +88,8 @@ class sc_net_framework:
                                                dc_confidence_threshold=self._dc_confidence_threshold,
                                                eos_coef=self._eos_coef,
                                                label_smoothing=self._label_smoothing,
-                                               use_soft_dc=self._use_soft_dc)
+                                               use_soft_dc=self._use_soft_dc,
+                                               ordinal_weight=self._ordinal_weight)
             self.dataLoader_train, self.dataLoader_eval, self.dataLoader_test = self.get_dataloader()
 
     def get_model(self):
@@ -135,7 +137,8 @@ class sc_net_framework:
                     use_focal=False, focal_gamma=2.0,
                     dc_confidence_threshold=0.0,
                     eos_coef=None,
-                    label_smoothing=0.0, use_soft_dc=False):
+                    label_smoothing=0.0, use_soft_dc=False,
+                    ordinal_weight=0.0):
         effective_eos = eos_coef if eos_coef is not None else opt.data_params["eos_coef"]
         return opt_fn.spatio_temporal_contrast_loss(
             num_classes=self.model_num_classes,
@@ -148,6 +151,7 @@ class sc_net_framework:
             dc_confidence_threshold=dc_confidence_threshold,
             label_smoothing=label_smoothing,
             use_soft_dc=use_soft_dc,
+            ordinal_weight=ordinal_weight,
         )
 
     def get_dataloader(self):
@@ -162,6 +166,7 @@ class sc_net_framework:
             )
             self.train_indices = train_idx
             self.val_indices = val_idx
+            self.eval_indices = val_idx  # alias used by Trainer.setup_data()
             self.test_indices = test_idx
 
             dataset_training = aug.cubic_sequence_data(

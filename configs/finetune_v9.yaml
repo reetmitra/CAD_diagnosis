@@ -1,18 +1,33 @@
 # configs/finetune_v9.yaml
-# Fine-tuning from v9 pre-trained checkpoint
-# Based on proven finetune_v7.yaml — identical except checkpoint_dir and min_delta tweak
+# Fine-tuning from v9 pre-trained checkpoint — includes all 2026-03-31 improvements:
+#   - Temporal branch architecture fix (temporal transformer now active across 32 cubes)
+#   - Ordinal EMD loss for stenosis severity (reduces Healthy↔Significant confusion)
+#   - Cosine warm restarts to escape local minima
+#   - SWA from epoch 120 for flat-minima generalisation
 
 pattern: fine_tuning
 data_root: ./dataset/train
 
 # Training schedule
-epochs: 200
+epochs: 250
 lr: 3.0e-5
 weight_decay: 1.0e-4
 grad_clip: 0.1
 warmup_epochs: 10
 
-# L_dc warm-up: hold=20, ramp=30 — same proven schedule as v7
+# LR schedule: cosine warm restarts (T0=60, ×2 per restart)
+# Effective cycles: 60 → 120 → 240 epochs.  The first restart at ep60
+# shakes the model out of any early local minimum.
+lr_schedule: cosine_warm_restarts
+lr_t0: 60
+lr_t_mult: 2
+
+# SWA: average weights from ep120 onward — finds flatter minima
+swa: true
+swa_start_epoch: 120
+# swa_lr defaults to lr/2 = 1.5e-5
+
+# L_dc warm-up (same proven schedule as v7)
 dc_warmup_hold: 20
 dc_warmup_ramp: 30
 delta: 1.0
@@ -20,13 +35,17 @@ dc_confidence_threshold: 0.3
 soft_dc: true
 label_smoothing: 0.1
 
+# Ordinal loss: 0.5 weight on EMD term — penalises Healthy↔Sig more than adjacent errors
+ordinal_weight: 0.5
+
 # Early stopping
-patience: 50
+patience: 60
 min_delta: 0.001
 
 # Class imbalance handling
 balanced_sampling: true
 sc_class_weight: true
+boost_nonsig: true
 focal_loss: true
 focal_gamma: 2.0
 eos_coef: 0.15

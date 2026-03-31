@@ -102,6 +102,58 @@ def compute_sc_class_weights(num_classes, boost_nonsig=False, nonsig_idx=2):
     return weights
 
 
+class OrdinalEMDLoss(nn.Module):
+    """Earth Mover's Distance loss for ordinal classification.
+
+    Penalises predictions proportional to the *ordinal distance* between the
+    predicted class distribution and the ground-truth class.  This is more
+    appropriate than cross-entropy for ordered labels such as stenosis
+    severity (Healthy < Non-significant < Significant) because it assigns a
+    larger gradient to gross ordinal errors (Healthy ↔ Significant) than to
+    adjacent-class errors (Healthy ↔ Non-significant).
+
+    Implementation: squared EMD over the cumulative distribution functions:
+        loss = mean( ||CDF(pred) − CDF(target)||^2 )
+
+    References:
+        Hou et al., "Squared Earth Mover's Distance-based Loss for Training
+        Deep Neural Networks on Ordered-classes", arXiv:1611.05916.
+
+    Args:
+        num_classes: Number of ordered classes.
+        weight: Optional per-class weight tensor (same shape as for CE).
+    """
+
+    def __init__(self, num_classes: int, weight: torch.Tensor | None = None):
+        super().__init__()
+        self.num_classes = num_classes
+        if weight is not None:
+            self.register_buffer('weight', weight)
+        else:
+            self.weight = None
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs:  Float tensor of shape (N, C) — raw logits.
+            targets: Long tensor of shape (N,)   — ground-truth class indices.
+        """
+        probs = torch.softmax(inputs.float(), dim=1)  # (N, C)
+        cum_probs = torch.cumsum(probs, dim=1)         # (N, C)
+
+        target_onehot = torch.zeros_like(probs)
+        target_onehot.scatter_(1, targets.view(-1, 1), 1.0)
+        cum_targets = torch.cumsum(target_onehot, dim=1)  # (N, C)
+
+        emd = ((cum_probs - cum_targets) ** 2).sum(dim=1)  # (N,)
+
+        if self.weight is not None:
+            sample_weights = self.weight[targets]
+            emd = emd * sample_weights
+
+        return emd.mean()
+
+
 class FocalLoss(nn.Module):
     """Focal loss for handling class imbalance in classification tasks.
 
@@ -135,13 +187,15 @@ class FocalLoss(nn.Module):
 
 class sampling_point_classification_loss(nn.Module):
     def __init__(self, num_classes=3, seq_length=32, class_weights=None,
-                 use_focal=False, focal_gamma=2.0, label_smoothing=0.0):
+                 use_focal=False, focal_gamma=2.0, label_smoothing=0.0,
+                 ordinal_weight=0.0):
         super().__init__()
 
         self.num_classes = num_classes
         self.seq_length = seq_length
         self.use_focal = use_focal
         self.label_smoothing = label_smoothing
+        self.ordinal_weight = ordinal_weight
 
         if class_weights is not None:
             self.register_buffer('class_weights', class_weights)
@@ -152,11 +206,21 @@ class sampling_point_classification_loss(nn.Module):
             self.focal_loss_fn = FocalLoss(
                 alpha=self.class_weights, gamma=focal_gamma, reduction='mean')
 
+        if ordinal_weight > 0.0:
+            self.ordinal_loss_fn = OrdinalEMDLoss(
+                num_classes=num_classes, weight=class_weights)
+
     def loss_labels(self, outputs, targets):
         if self.use_focal:
-            return self.focal_loss_fn(outputs, targets)
-        return F.cross_entropy(outputs, targets, weight=self.class_weights,
-                               label_smoothing=self.label_smoothing)
+            base = self.focal_loss_fn(outputs, targets)
+        else:
+            base = F.cross_entropy(outputs, targets, weight=self.class_weights,
+                                   label_smoothing=self.label_smoothing)
+
+        if self.ordinal_weight > 0.0:
+            base = base + self.ordinal_weight * self.ordinal_loss_fn(outputs, targets)
+
+        return base
 
     def loss_soft(self, outputs, soft_targets):
         """Compute KL-divergence loss against soft probability targets."""
@@ -400,7 +464,8 @@ class spatio_temporal_contrast_loss(nn.Module):
                  delta=1.0, sc_class_weights=None,
                  use_focal=False, focal_gamma=2.0,
                  dc_confidence_threshold=0.0,
-                 label_smoothing=0.0, use_soft_dc=False):
+                 label_smoothing=0.0, use_soft_dc=False,
+                 ordinal_weight=0.0):
         super().__init__()
 
         self.num_classes = num_classes
@@ -416,7 +481,8 @@ class spatio_temporal_contrast_loss(nn.Module):
             num_classes=self.num_classes + 1, seq_length=self.seq_length,
             class_weights=sc_class_weights,
             use_focal=use_focal, focal_gamma=focal_gamma,
-            label_smoothing=label_smoothing)
+            label_smoothing=label_smoothing,
+            ordinal_weight=ordinal_weight)
         self.dc_loss = dual_task_contrastive_loss(
             self.od_loss, self.sc_loss, seq_length=self.seq_length,
             confidence_threshold=dc_confidence_threshold,

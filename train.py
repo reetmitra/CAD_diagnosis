@@ -37,7 +37,7 @@ from torch.utils.tensorboard import SummaryWriter
 from framework import sc_net_framework
 from config import opt
 from optimization import compute_sc_class_weights
-from scheduler_utils import LinearWarmupCosineDecay, ModelEMA, build_param_groups
+from scheduler_utils import LinearWarmupCosineDecay, CosineAnnealingWarmRestarts, ModelEMA, build_param_groups
 from eval import od_predictions_to_artery_level, targets_to_artery_level, compute_metrics
 
 
@@ -136,6 +136,10 @@ def parse_args(argv=None):
                         help='Disable class weighting for SC loss')
     parser.add_argument('--boost_nonsig', action='store_true', default=False,
                         help='Double loss weight for Non-significant stenosis class (index 2)')
+    parser.add_argument('--ordinal_weight', type=float, default=0.0,
+                        help='Weight for ordinal EMD loss term (0=disabled, e.g. 0.5). '
+                             'Penalises severity misjudgements proportional to ordinal distance '
+                             '(Healthy↔Significant > Healthy↔NonSig).')
 
     parser.add_argument('--focal_loss', action='store_true',
                         help='Use focal loss instead of CE for SC branch')
@@ -160,6 +164,21 @@ def parse_args(argv=None):
     parser.add_argument('--balanced_sampling', action='store_true',
                         help='Use class-balanced batch sampling (WeightedRandomSampler)')
 
+    parser.add_argument('--lr_schedule', type=str, default='cosine',
+                        choices=['cosine', 'cosine_warm_restarts'],
+                        help='LR schedule: "cosine" (linear warmup + cosine decay, default) or '
+                             '"cosine_warm_restarts" (CosineAnnealingWarmRestarts, good for long runs)')
+    parser.add_argument('--lr_t0', type=int, default=50,
+                        help='First cycle length in epochs for cosine_warm_restarts (default: 50)')
+    parser.add_argument('--lr_t_mult', type=int, default=2,
+                        help='Cycle length multiplier for cosine_warm_restarts (default: 2)')
+    parser.add_argument('--swa', action='store_true', default=False,
+                        help='Enable Stochastic Weight Averaging (SWA). Starts averaging after '
+                             '--swa_start_epoch and updates SWA model every epoch.')
+    parser.add_argument('--swa_start_epoch', type=int, default=None,
+                        help='Epoch to start SWA averaging (default: half of --epochs)')
+    parser.add_argument('--swa_lr', type=float, default=None,
+                        help='SWA learning rate (default: half of --lr)')
     parser.add_argument('--log_dir', type=str, default='./runs',
                         help='Base directory for TensorBoard logs')
     parser.add_argument('--log_every', type=int, default=10,
@@ -326,6 +345,7 @@ class Trainer:
             spatial_encoder_layers=getattr(self.args, 'spatial_encoder_layers', None),
             spatial_decoder_layers=getattr(self.args, 'spatial_decoder_layers', None),
             multi_window=self.args.multi_window,
+            ordinal_weight=getattr(self.args, 'ordinal_weight', 0.0),
         )
         self._fw = fw  # keep reference for data setup
 
@@ -365,13 +385,13 @@ class Trainer:
 
         eval_dataset = aug.cubic_sequence_data(
             dataset_root=fw.data_root,
-            pattern='eval',
+            pattern='validation',  # must be 'validation' — 'eval' maps to test split
             train_ratio=fw.train_ratio,
             input_shape=fw.input_shape,
             window=fw.window_lw,
-            augment=False, # No augmentation for evaluation
+            augment=False,
             num_classes=fw.model_num_classes,
-            file_indices=getattr(fw, 'eval_indices', None),
+            file_indices=getattr(fw, 'eval_indices', None),  # eval_indices = val_indices when patient_split
             multi_window=self.args.multi_window
         )
         batch_size = opt.data_params["batch_size"]
@@ -415,25 +435,32 @@ class Trainer:
         )
 
     def _compute_sample_weights(self, dataset):
-        """Compute per-sample weights for balanced sampling based on stenosis class."""
-        import numpy as np
+        """Compute per-sample weights for balanced sampling based on stenosis class.
 
-        # Determine the dominant class per sample (stenosis-level)
-        # For 6-class fine-tuning: 0=bg, 1-3=non-significant, 4-6=significant
-        # Map to stenosis: 0=healthy, 1=non-significant, 2=significant
+        Uses the dataset's file_pairs API (vol_path, sten_path, plaq_path, comb_path)
+        to load label files directly, avoiding dependency on the deprecated
+        labels_file_list attribute.
+        """
+        import augmentation as _aug
+
         class_counts = {0: 0, 1: 0, 2: 0}
         sample_classes = []
 
         for i in range(len(dataset)):
             if dataset.file_indices is not None:
-                idx = dataset.file_indices[i]
+                actual_idx = dataset.file_indices[i]
             else:
-                idx = i + dataset.data_start
+                actual_idx = i + dataset.data_start
 
-            labels_file = os.path.join(dataset.labels_root, dataset.labels_file_list[idx])
-            labels = np.loadtxt(labels_file).astype(np.int32)
+            _, sten_path, plaq_path, comb_path = dataset.file_pairs[actual_idx]
 
-            # Determine stenosis class: healthy (all 0), non-sig (any 1-3), sig (any 4-6)
+            if comb_path is not None:
+                labels = np.loadtxt(comb_path).astype(np.int32)
+            else:
+                sten = np.loadtxt(sten_path).astype(np.int32)
+                plaq = np.loadtxt(plaq_path).astype(np.int32)
+                labels = _aug.merge_new_labels(sten, plaq)
+
             max_label = int(labels.max())
             if max_label == 0:
                 sc = 0  # healthy
@@ -444,10 +471,9 @@ class Trainer:
             sample_classes.append(sc)
             class_counts[sc] += 1
 
-        # Inverse frequency weights
         total = len(sample_classes)
-        num_classes = len(class_counts)
-        class_weights = {c: total / (num_classes * max(count, 1))
+        num_classes_bal = len(class_counts)
+        class_weights = {c: total / (num_classes_bal * max(count, 1))
                          for c, count in class_counts.items()}
         sample_weights = [class_weights[c] for c in sample_classes]
 
@@ -459,8 +485,7 @@ class Trainer:
         return sample_weights
 
     def setup_optimizer(self):
-        """Create optimizer with optional layer-wise LR and warmup+cosine scheduler."""
-        # Param groups
+        """Create optimizer with optional layer-wise LR, warmup+cosine scheduler, and SWA."""
         raw_model = self.model.module if self.distributed else self.model
         if self.args.layerwise_lr:
             param_groups = build_param_groups(raw_model, self.args.lr)
@@ -474,11 +499,42 @@ class Trainer:
             weight_decay=self.args.weight_decay,
         )
 
-        self.scheduler = LinearWarmupCosineDecay(
-            self.optimizer,
-            max_epochs=self.args.epochs,
-            warmup_epochs=self.args.warmup_epochs,
-        )
+        lr_schedule = getattr(self.args, 'lr_schedule', 'cosine')
+        if lr_schedule == 'cosine_warm_restarts':
+            t0 = getattr(self.args, 'lr_t0', 50)
+            t_mult = getattr(self.args, 'lr_t_mult', 2)
+            self.scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer,
+                t_0=t0,
+                t_mult=t_mult,
+                warmup_epochs=self.args.warmup_epochs,
+            )
+            if self.is_main:
+                print(f"  [Scheduler] CosineAnnealingWarmRestarts T0={t0}, T_mult={t_mult}")
+        else:
+            self.scheduler = LinearWarmupCosineDecay(
+                self.optimizer,
+                max_epochs=self.args.epochs,
+                warmup_epochs=self.args.warmup_epochs,
+            )
+
+        # SWA setup
+        self.swa_model = None
+        self.swa_scheduler = None
+        if getattr(self.args, 'swa', False):
+            from torch.optim.swa_utils import AveragedModel, SWALR
+            swa_start = getattr(self.args, 'swa_start_epoch', None)
+            if swa_start is None:
+                swa_start = self.args.epochs // 2
+            self.swa_start_epoch = swa_start
+            swa_lr = getattr(self.args, 'swa_lr', None)
+            if swa_lr is None:
+                swa_lr = self.args.lr / 2
+            self.swa_model = AveragedModel(raw_model)
+            self.swa_scheduler = SWALR(self.optimizer, swa_lr=swa_lr,
+                                       anneal_epochs=max(1, (self.args.epochs - swa_start) // 5))
+            if self.is_main:
+                print(f"  [SWA] Enabled: start_epoch={swa_start}, swa_lr={swa_lr:.2e}")
 
     # ------------------------------------------------------------------
     # checkpoint
@@ -772,7 +828,13 @@ class Trainer:
             train_loss, train_od, train_sc, train_dc = self.train_one_epoch(epoch)
             val_loss, stenosis_metrics, plaque_metrics = self.validate(epoch)
 
-            self.scheduler.step()
+            # SWA: update averaged model after swa_start_epoch
+            if self.swa_model is not None and epoch >= self.swa_start_epoch:
+                self.swa_model.update_parameters(
+                    self.model.module if self.distributed else self.model)
+                self.swa_scheduler.step()
+            else:
+                self.scheduler.step()
             current_lr = self.optimizer.param_groups[0]['lr']
             elapsed = time.time() - epoch_start
 
@@ -840,6 +902,15 @@ class Trainer:
                     print(f"Early stopping at epoch {epoch} "
                           f"(no improvement for {self.args.patience} epochs)")
                 break
+
+        # Update SWA BatchNorm statistics and save SWA model
+        if self.swa_model is not None and self.is_main:
+            from torch.optim.swa_utils import update_bn
+            train_loader_for_bn = self.train_loader
+            update_bn(train_loader_for_bn, self.swa_model, device=self.device)
+            swa_path = os.path.join(self.args.checkpoint_dir, 'swa_model.pth')
+            torch.save({'model_state_dict': self.swa_model.module.state_dict()}, swa_path)
+            print(f"SWA model saved to {swa_path}")
 
         # Final checkpoint
         if self.is_main:

@@ -1,6 +1,6 @@
 # configs/finetune_v9_nonsig.yaml
-# Fine-tuning from v9 pre-trained checkpoint with Non-sig class weight boost
-# Identical to finetune_v9.yaml except: boost_nonsig=true, checkpoint_dir
+# Conservative fine-tune: proven v7 schedule + ordinal loss + Non-sig boost.
+# No SWA/warm-restarts — good as a stable parallel run alongside finetune_v9.yaml.
 
 pattern: fine_tuning
 data_root: ./dataset/train
@@ -12,6 +12,9 @@ weight_decay: 1.0e-4
 grad_clip: 0.1
 warmup_epochs: 10
 
+# Standard cosine decay (proven stable for SC-Net)
+lr_schedule: cosine
+
 # L_dc warm-up: hold=20, ramp=30 — same proven schedule as v7-ft
 dc_warmup_hold: 20
 dc_warmup_ramp: 30
@@ -20,11 +23,14 @@ dc_confidence_threshold: 0.3
 soft_dc: true
 label_smoothing: 0.1
 
+# Ordinal loss: lightweight 0.3 weight (more conservative than v9.yaml)
+ordinal_weight: 0.3
+
 # Early stopping
 patience: 50
 min_delta: 0.001
 
-# Class imbalance handling — Non-sig gets 3.0 weight (2x boost)
+# Class imbalance handling — Non-sig gets 2x weight boost
 balanced_sampling: true
 sc_class_weight: true
 boost_nonsig: true
