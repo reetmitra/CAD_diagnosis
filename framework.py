@@ -158,7 +158,14 @@ class sc_net_framework:
         # Compute patient-level split indices if requested
         if self._patient_split:
             volumes_root = os.path.join(self.data_root, 'volumes/')
-            file_list = sorted(os.listdir(volumes_root))
+            labels_root = os.path.join(self.data_root, 'labels/')
+            # Must use _build_file_pairs (not raw os.listdir) so indices align
+            # with the file_pairs list that cubic_sequence_data builds internally.
+            # os.listdir returns ~5794 files; _build_file_pairs deduplicates to
+            # ~2833 matched pairs — splitting on the raw list causes index OOB.
+            from augmentation import _build_file_pairs
+            pairs = _build_file_pairs(volumes_root, labels_root)
+            file_list = [os.path.basename(p[0]) for p in pairs]
             train_idx, val_idx, test_idx = patient_level_split(
                 file_list, train_ratio=self.train_ratio,
                 val_ratio=(1 - self.train_ratio) / 2,
