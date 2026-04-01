@@ -62,33 +62,48 @@ import augmentation as aug
 STENOSIS_NAMES = ['Healthy', 'Non-significant', 'Significant']
 PLAQUE_NAMES   = ['Calcified', 'Non-calcified', 'Mixed']
 
-# Colour per raw label value (0 = no colour)
-RAW_LABEL_COLOURS = {
-    0: None,
-    1: '#FFD700',   # gold   — Non-sig + Calcified
-    2: '#FFA500',   # orange — Non-sig + Calcified (variant)
-    3: '#FF6600',   # dark-orange — Sig + Non-calc
-    4: '#FF4400',   # red-orange  — Sig + Non-calc (variant)
-    5: '#FF0000',   # red         — Sig + Mixed
-    6: '#CC0000',   # dark-red    — Sig + Mixed (variant)
+# Paper Figure 3 colour legend (6 semantic classes):
+#   raw label 0              → No-lesion       (green)
+#   raw labels 1,2,3  (non-sig + any plaque)   → stenosis bars: Non-significant (yellow)
+#   raw labels 4,5,6  (sig + any plaque)       → stenosis bars: Significant (orange)
+#   plaque component decoded separately:
+#     calcified (labels 1,4) → blue
+#     non-calcified (2,5)    → pink
+#     mixed (3,6)            → purple
+
+# Single combined-bar colour map: raw label 0-6 → paper colour
+# Each raw label encodes both stenosis severity and plaque type.
+# We match the paper bar exactly: one colour per raw label.
+RAW_BAR_COLOURS = {
+    0: '#4CAF50',   # green       — No-lesion
+    1: '#FFD700',   # yellow      — Non-sig + Calcified
+    2: '#FF80AB',   # pink        — Non-sig + Non-calcified
+    3: '#9C27B0',   # purple      — Non-sig + Mixed
+    4: '#FF6600',   # orange      — Significant + Calcified
+    5: '#FF6680',   # orange-pink — Significant + Non-calcified
+    6: '#CC3300',   # dark-red    — Significant + Mixed
 }
 
-# Prediction-box colours by artery-level stenosis prediction
+# Prediction-box overlay colours (used in comparison/annotation mode)
 PRED_COLOURS = {
-    0: '#00CC00',   # green  — predicted Healthy
-    1: '#FFD700',   # gold   — predicted Non-sig
-    2: '#FF0000',   # red    — predicted Significant
+    0: '#4CAF50',   # green  — predicted Healthy
+    1: '#FFD700',   # yellow — predicted Non-sig
+    2: '#FF6600',   # orange — predicted Significant
 }
-
-# Semantic bar colours for stenosis (Healthy/Non-sig/Significant)
-STEN_BAR_COLOURS = {0: '#CCCCCC', 1: '#FFD700', 2: '#FF0000'}
-
-# Semantic bar colours for plaque type (Calcified/Non-calcified/Mixed)
-PLAQ_BAR_COLOURS = {0: '#000000', 1: '#2196F3', 2: '#4CAF50', 3: '#9C27B0'}
 
 # HU windowing (must match training: window=[300, 900])
 HU_MIN = 300 - 900 / 2   # = -150
 HU_MAX = 300 + 900 / 2   # =  750
+
+# Paper legend entries (for legend patches)
+PAPER_LEGEND = [
+    ('#4CAF50', 'No-lesion'),
+    ('#FFD700', 'Non-significant stenosis'),
+    ('#FF6600', 'Significant stenosis'),
+    ('#2196F3', 'Calcified plaque'),
+    ('#FF80AB', 'Non-calcified plaque'),
+    ('#9C27B0', 'Mixed plaque'),
+]
 
 
 # ─── Label helpers ────────────────────────────────────────────────────────────
@@ -552,372 +567,191 @@ def load_volume_and_labels(vol_path, sten_path=None, plaq_path=None, comb_path=N
     return vol, labels
 
 
+
+
 def render_artery(artery_id, volume, labels, save_path,
                   stenosis_pred=None, plaque_pred=None, od_outputs=None,
                   num_classes=6,
                   stenosis_pred2=None, plaque_pred2=None, od_outputs2=None,
                   num_classes2=6,
-                  label1='Model A', label2='Model B',
+                  label1="Model A", label2="Model B",
                   iou_threshold=0.3):
-    """Render longitudinal CPR strip(s) with GT label bands, TP/FN/FP markers,
-    and coloured cross-section borders.
+    """Render a CPR visualisation matching the layout of Figure 3 in the paper.
 
-    Single-strip mode (od_outputs2 is None):
-        One model strip + cross-section panels with white borders.
+    Layout per PNG (top to bottom):
+        Row 0: Longitudinal CPR grayscale strip (thin MIP over central rows)
+              with red X sampling-point markers matching the paper figure
+        Row 1: Ground Truth combined bar
+        Row 2: Model 1 prediction bar
+        Row 3: Model 2 prediction bar  (comparison mode only)
+        Row 4: Cross-section panels at the centre of each GT lesion segment
 
-    Comparison mode (od_outputs2 is not None):
-        Two stacked model strips + cross-section panels with coloured borders:
-            green  = TP in model 2
-            orange = FN for model 1 but TP for model 2
-            red    = FN in both models
-            white  = no GT
-
-    Args:
-        artery_id:      str, used in title
-        volume:         np.ndarray (256, 64, 64), raw HU
-        labels:         np.ndarray (256,), int32 raw labels
-        save_path:      str, output PNG path
-        stenosis_pred:  int 0-2 or None (model 1 artery-level stenosis prediction)
-        plaque_pred:    int 0-2/-1 or None (model 1)
-        od_outputs:     dict with 'pred_logits' [Q,C+1] and 'pred_boxes' [Q,2], or None
-        num_classes:    int 3 or 6 (model 1)
-        stenosis_pred2: int 0-2 or None (model 2)
-        plaque_pred2:   int 0-2/-1 or None (model 2)
-        od_outputs2:    dict like od_outputs, or None; triggers comparison mode when set
-        num_classes2:   int 3 or 6 (model 2)
-        label1:         display label for model 1 strip
-        label2:         display label for model 2 strip
-        iou_threshold:  1D IoU cutoff for TP/FN/FP classification
+    Each bar is the same pixel-width as the CPR strip, using the paper legend:
+        green=No-lesion, yellow=Non-sig stenosis, orange=Significant stenosis,
+        blue=Calcified, pink=Non-calcified, purple=Mixed
     """
+    import matplotlib.colors as mcolors
+
     segments = decode_label_segments(labels)
     sten_gt  = _sten_gt_from_labels(labels)
+    D        = volume.shape[0]
 
-    # ── Longitudinal strip: centre cross-section row across all z ──────────
-    cy = volume.shape[1] // 2   # center row of cross-section
-    strip = volume[:, cy, :].T   # (cross_section_width, 256) — x=vessel axis
+    # ── CPR strip: thin MIP over 5 central rows — less noise than a single row
+    H        = volume.shape[1]
+    cy       = H // 2
+    r0, r1   = max(0, cy - 2), min(H, cy + 3)
+    strip      = volume[:, r0:r1, :].max(axis=1).T    # (W, D)
     strip_norm = normalize_ct_data(strip, hu_min=HU_MIN, hu_max=HU_MAX)
 
-    # ── Cross-section positions: centre of each labelled segment ───────────
-    cs_positions = [((s + e) // 2, lbl) for s, e, lbl in segments]
-    cs_positions = cs_positions[:4]
-    n_cs = max(len(cs_positions), 1)
-
-    D = volume.shape[0]   # vessel axis length, typically 256
+    # ── Cross-section positions: centre of each GT segment (up to 4)
+    cs_positions = [((s + e) // 2, lbl) for s, e, lbl in segments][:4]
+    n_cs  = max(len(cs_positions), 1)
 
     comparison_mode = od_outputs2 is not None
+    n_bar_rows      = 3 if comparison_mode else 2   # GT + model1 [+ model2]
 
-    # ── Figure layout ──────────────────────────────────────────────────────
-    if comparison_mode:
-        fig = plt.figure(figsize=(max(14, n_cs * 4), 10))
-        gs  = fig.add_gridspec(3, n_cs, height_ratios=[3, 3, 2],
-                               hspace=0.5, wspace=0.3)
-        ax_long  = fig.add_subplot(gs[0, :])
-        ax_long2 = fig.add_subplot(gs[1, :])
-        cs_row   = 2
-    else:
-        # Single-model mode: 2x2 grid for bars (GT/Pred × Stenosis/Plaque) + cross-sections
-        # Use max(n_cs, 2) columns so bars can span and cross-sections have space
-        n_cols = max(n_cs, 2)
-        fig = plt.figure(figsize=(max(16, n_cols * 4), 9))
-        gs  = fig.add_gridspec(4, n_cols, height_ratios=[3, 0.4, 0.4, 2],
-                               hspace=0.35, wspace=0.25)
-        ax_long    = fig.add_subplot(gs[0, :])
-        # Bars: split columns in half for GT/Pred side-by-side
-        half_col = n_cols // 2
-        ax_gt_sten = fig.add_subplot(gs[1, :half_col])
-        ax_pred_sten = fig.add_subplot(gs[1, half_col:])
-        ax_gt_plaq = fig.add_subplot(gs[2, :half_col])
-        ax_pred_plaq = fig.add_subplot(gs[2, half_col:])
-        ax_long2   = None
-        cs_row     = 3
+    # ── Figure layout
+    bar_h = 0.35
+    hr    = [3] + [bar_h] * n_bar_rows + [1.8]
+    fig   = plt.figure(figsize=(max(14, n_cs * 3.5), sum(hr) * 1.4))
+    gs    = fig.add_gridspec(2 + n_bar_rows, n_cs,
+                             height_ratios=hr, hspace=0.18, wspace=0.25)
+    ax_strip    = fig.add_subplot(gs[0, :])
+    bar_axes    = [fig.add_subplot(gs[1 + i, :]) for i in range(n_bar_rows)]
+    cs_row_idx  = 1 + n_bar_rows
 
-    # ── Inner helper: draw a single model strip ─────────────────────────────
-    def _draw_strip(ax, od_out, n_cls, model_label, sten_pred_val, annotate=True):
-        """Render one longitudinal strip.
-
-        annotate=True  (comparison mode): GT bands, TP/FN/FP boxes, legend, title.
-        annotate=False (single-model):    CT image only — GT/Pred bars carry the info.
-
-        Returns (tp_count, fn_count, fp_count, pred_intervals_out).
-        pred_intervals_out is a list of (x0_norm, x1_norm) tuples for each
-        surviving predicted query (empty when od_out is None).
-        """
-        # 1. Background CT image
-        ax.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
-                  vmin=0, vmax=1)
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-        tp_count = fn_count = fp_count = 0
-        pred_intervals_out = []
-
-        if od_out is not None:
-            tp_idx, fn_idx, fp_idx, pred_ivs, surv_q = match_predictions_to_gt(
-                od_out, segments, n_cls, D, iou_thresh=iou_threshold)
-            pred_intervals_out = pred_ivs
-            tp_count = len(tp_idx)
-            fn_count = len(fn_idx)
-            fp_count = len(fp_idx)
-
-        if not annotate:
-            return tp_count, fn_count, fp_count, pred_intervals_out
-
-        # ── Annotated mode (comparison strips) ─────────────────────────────
-
-        # 2. GT bands
-        for seg_start, seg_end, raw_lbl in segments:
-            colour = RAW_LABEL_COLOURS.get(raw_lbl)
-            if colour is not None:
-                ax.axvspan(seg_start, seg_end, alpha=0.35, color=colour)
-
-        # 3. TP / FN / FP markers
-        if od_out is not None:
-            pred_logits  = od_out['pred_logits']
-            pred_probs   = F.softmax(pred_logits, dim=-1)
-            pred_classes = pred_probs.argmax(dim=-1)
-
-            # TP boxes — solid coloured border
-            for pi in tp_idx:
-                x0 = pred_ivs[pi][0] * D
-                x1 = pred_ivs[pi][1] * D
-                if x1 - x0 < 1.0:
-                    continue
-                q   = surv_q[pi]
-                cls = pred_classes[q].item()
-                sten_group = 1 if (n_cls == 6 and cls < 2) else 2
-                colour = PRED_COLOURS[sten_group]
-                ax.axvspan(x0, x1, alpha=0.0, edgecolor=colour,
-                           linewidth=2, fill=False)
-                ax.text((x0 + x1) / 2, 1, 'TP', color=colour,
-                        fontsize=7, ha='center', va='top', fontweight='bold')
-
-            # FP boxes — dashed orange border
-            for pi in fp_idx:
-                x0 = pred_ivs[pi][0] * D
-                x1 = pred_ivs[pi][1] * D
-                if x1 - x0 < 1.0:
-                    continue
-                ax.axvspan(x0, x1, alpha=0.0, edgecolor='orange',
-                           linewidth=1.5, linestyle='--', fill=False)
-                ax.text((x0 + x1) / 2, 1, 'FP', color='orange',
-                        fontsize=7, ha='center', va='top')
-
-            # FN segments — hatched overlay
-            for si in fn_idx:
-                seg_start, seg_end, raw_lbl = segments[si]
-                colour = RAW_LABEL_COLOURS.get(raw_lbl, '#FF0000') or '#FF0000'
-                ax.axvspan(seg_start, seg_end, alpha=0.6, color=colour,
-                           hatch='///', edgecolor='white', linewidth=0.5)
-                ax.text((seg_start + seg_end) / 2,
-                        strip_norm.shape[0] - 2,
-                        'FN', color='white', fontsize=7,
-                        ha='center', va='bottom', fontweight='bold')
-
-        # 4. Strip title
-        if sten_pred_val is not None:
-            tick = '\u2713' if sten_pred_val == sten_gt else '\u2717'
-            title_str = (f'{model_label}  |  '
-                         f'Pred: {STENOSIS_NAMES[sten_pred_val]} {tick}  |  '
-                         f'TP:{tp_count} FN:{fn_count} FP:{fp_count}')
-        else:
-            title_str = f'{model_label}  |  GT only'
-        ax.set_title(title_str, fontsize=9, loc='left')
-
-        # 5. Legend
-        legend_patches = [
-            mpatches.Patch(color=c, alpha=0.6, label=f'Raw {lbl}')
-            for lbl, c in RAW_LABEL_COLOURS.items() if lbl != 0 and c is not None
-        ]
-        if legend_patches:
-            ax.legend(handles=legend_patches, loc='upper right',
-                      fontsize=7, ncol=len(legend_patches))
-
-        # 6. Axis labels
-        ax.set_xlabel('Vessel axis position (slice index)', fontsize=8)
-        ax.set_ylabel('Cross-section (px)', fontsize=8)
-
-        return tp_count, fn_count, fp_count, pred_intervals_out
-
-    def _extract_per_slice_predictions(od_outputs, num_classes, D, conf_thresh=0.15):
-        """Extract per-slice stenosis and plaque predictions from OD outputs.
-
-        Returns:
-            sten_pred: np.ndarray shape (D,), stenosis class 0-2 per slice (0=no pred)
-            plaq_pred: np.ndarray shape (D,), plaque class 0-3 per slice (0=no pred)
-        """
-        if od_outputs is None:
-            return np.zeros(D, dtype=int), np.zeros(D, dtype=int)
-
-        pred_logits = od_outputs['pred_logits']   # [Q, C+1]
-        pred_boxes  = od_outputs['pred_boxes']    # [Q, 2]
-
-        sten_pred = np.zeros(D, dtype=int)
-        plaq_pred = np.zeros(D, dtype=int)
-
-        probs = torch.nn.functional.softmax(pred_logits, dim=-1)  # [Q, C+1]
-        pred_classes = torch.argmax(probs, dim=-1)   # [Q]
-
-        for q in range(pred_logits.shape[0]):
-            cls = pred_classes[q].item()
-            if cls >= num_classes:  # no-object class
-                continue
-            fg_prob = probs[q, cls].item()
-            no_obj_prob = probs[q, num_classes].item()
-            if fg_prob <= no_obj_prob or fg_prob < conf_thresh:
-                continue
-            # Get box position
-            cx = pred_boxes[q, 0].item()
-            w  = pred_boxes[q, 1].item()
-            x0 = cx - w / 2.0
-            x1 = cx + w / 2.0
-            start = max(0, int(x0 * D))
-            end   = min(D, math.ceil(x1 * D))
-            # Decode class: cls 0-5 in 6-class mode
-            # class 1-3 = nonsig+{calc,noncalc,mixed}, 4-6 = sig+{calc,noncalc,mixed}
-            sten_class = 2 if cls >= 3 else 1
-            plaq_class = (cls % 3) + 1
-            # Fill slices (higher confidence predictions overwrite)
-            sten_pred[start:end] = sten_class
-            plaq_pred[start:end] = plaq_class
-
-        return sten_pred, plaq_pred
-
-    def _draw_semantic_bar(ax_bar, labels_1d, colour_map, label_text):
-        """Render a semantic label bar where each pixel column is coloured by its class.
-
-        labels_1d: np.ndarray shape (D,), int; class indices
-        colour_map: dict mapping class index → hex colour
-        label_text: short string shown on y-axis tick (e.g. 'Stenosis' or 'Plaque')
-        """
-        import matplotlib.colors as mcolors
-        # Create RGB image: shape (1, D, 3)
-        D = len(labels_1d)
-        bar_rgb = np.zeros((1, D, 3))
+    # ── Helper: draw one combined-label bar
+    def _draw_combined_bar(ax, labels_1d, row_label):
+        n       = len(labels_1d)
+        bar_rgb = np.zeros((1, n, 3))
         for i, lbl in enumerate(labels_1d):
-            hex_color = colour_map.get(lbl, '#808080')  # default grey
-            rgb = mcolors.hex2color(hex_color)
-            bar_rgb[0, i, :] = rgb
-        ax_bar.imshow(bar_rgb, aspect='auto', origin='upper')
-        ax_bar.set_xticks([])
-        ax_bar.set_yticks([0])
-        ax_bar.set_yticklabels([label_text], fontsize=7)
-        for spine in ax_bar.spines.values():
+            bar_rgb[0, i, :] = mcolors.hex2color(
+                RAW_BAR_COLOURS.get(int(lbl), '#808080'))
+        ax.imshow(bar_rgb, aspect='auto', origin='upper', interpolation='nearest')
+        ax.set_xticks([])
+        ax.set_yticks([0])
+        ax.set_yticklabels([row_label], fontsize=8, fontweight='bold')
+        for spine in ax.spines.values():
             spine.set_visible(False)
 
-    def _draw_label_bar(ax_bar, coverage_1d, label_text):
-        """Render a thin 1×D horizontal label bar (binary: black/red).
+    # ── Helper: OD outputs → per-slice combined-label array (0-6)
+    def _od_to_combined_labels(od_out, n_cls, conf_thresh=0.15):
+        out = np.zeros(D, dtype=np.int32)
+        if od_out is None:
+            return out
+        pred_logits = od_out['pred_logits']
+        pred_boxes  = od_out['pred_boxes']
+        probs       = F.softmax(pred_logits, dim=-1)
+        pred_cls    = probs.argmax(dim=-1)
+        for q in range(pred_logits.shape[0]):
+            cls = pred_cls[q].item()
+            if cls >= n_cls:
+                continue
+            fg_prob  = probs[q, cls].item()
+            no_obj_p = probs[q, n_cls].item()
+            if fg_prob <= no_obj_p or fg_prob < conf_thresh:
+                continue
+            cx  = pred_boxes[q, 0].item()
+            w   = pred_boxes[q, 1].item()
+            x0  = int(max(0, (cx - w / 2) * D))
+            x1  = int(min(D, (cx + w / 2) * D))
+            if x1 <= x0:
+                continue
+            raw_lbl = cls + 1
+            out[x0:x1] = np.where(out[x0:x1] < raw_lbl, raw_lbl, out[x0:x1])
+        return out
 
-        coverage_1d: np.ndarray shape (D,), int; 0=normal(black), 1=abnormal(red)
-        label_text:  short string shown on y-axis tick ('GT' or 'Pred')
-        """
-        import matplotlib.colors as mcolors
-        cmap = mcolors.ListedColormap(['black', 'red'])
-        bar  = coverage_1d.reshape(1, -1)   # shape (1, D)
-        ax_bar.imshow(bar, cmap=cmap, vmin=0, vmax=1,
-                      aspect='auto', origin='upper')
-        ax_bar.set_xticks([])
-        ax_bar.set_yticks([0])
-        ax_bar.set_yticklabels([label_text], fontsize=7)
-        for spine in ax_bar.spines.values():
-            spine.set_visible(False)
+    # ── CT strip
+    ax_strip.imshow(strip_norm, cmap='gray', aspect='auto', origin='upper',
+                    vmin=0, vmax=1)
+    ax_strip.set_xticks([])
+    ax_strip.set_yticks([])
+    ax_strip.set_ylabel('CPR', fontsize=8)
 
-    # ── Draw strip(s) ──────────────────────────────────────────────────────
-    _, _, _, pred_ivs = _draw_strip(ax_long, od_outputs, num_classes, label1, stenosis_pred,
-                                    annotate=comparison_mode)
-    if comparison_mode:
-        _draw_strip(ax_long2, od_outputs2, num_classes2, label2, stenosis_pred2)
+    # Red X sampling-point markers (32 cubes, step=8, matching paper figure)
+    cube_step = 8
+    num_cubes = 32
+    strip_cy  = strip_norm.shape[0] // 2
+    for i in range(num_cubes):
+        sx = cube_step // 2 + cube_step * i - 1
+        if 0 <= sx < D:
+            ax_strip.plot(sx, strip_cy, 'rx', markersize=4,
+                          markeredgewidth=1.0, alpha=0.85)
 
-    # ── Label bars (single-model mode only) ─────────────────────────────────
-    if not comparison_mode:
-        # Derive GT stenosis and plaque from combined labels
-        sten_gt_slice = np.where(labels == 0, 0, np.where(labels >= 4, 2, 1))
-        plaq_gt_slice = np.where(labels == 0, 0, ((labels - 1) % 3) + 1)
-        # Extract predicted stenosis and plaque from OD outputs
-        sten_pred_slice, plaq_pred_slice = _extract_per_slice_predictions(
-            od_outputs, num_classes, D, conf_thresh=0.15)
-        # Draw 2x2 grid: GT/Pred × Stenosis/Plaque
-        _draw_semantic_bar(ax_gt_sten, sten_gt_slice, STEN_BAR_COLOURS, 'GT Stenosis')
-        _draw_semantic_bar(ax_pred_sten, sten_pred_slice, STEN_BAR_COLOURS, 'Pred Stenosis')
-        _draw_semantic_bar(ax_gt_plaq, plaq_gt_slice, PLAQ_BAR_COLOURS, 'GT Plaque')
-        _draw_semantic_bar(ax_pred_plaq, plaq_pred_slice, PLAQ_BAR_COLOURS, 'Pred Plaque')
-
-    # ── Figure suptitle ────────────────────────────────────────────────────
-    if comparison_mode:
-        fig.suptitle(f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}',
-                     fontsize=11, fontweight='bold')
-    elif od_outputs is not None:
-        tick = '\u2713' if stenosis_pred == sten_gt else '\u2717'
-        fig.suptitle(
-            f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}'
-            f'   |   Pred: {STENOSIS_NAMES[stenosis_pred]} {tick}',
-            fontsize=11, fontweight='bold')
+    # Title
+    if od_outputs is not None and stenosis_pred is not None:
+        tick  = '✓' if stenosis_pred == sten_gt else '✗'
+        title = (f'{artery_id}  |  GT: {STENOSIS_NAMES[sten_gt]}'
+                 f'  |  {label1}: {STENOSIS_NAMES[stenosis_pred]} {tick}')
     else:
-        fig.suptitle(f'{artery_id}   |   GT: {STENOSIS_NAMES[sten_gt]}',
-                     fontsize=11, fontweight='bold')
+        title = f'{artery_id}  |  GT: {STENOSIS_NAMES[sten_gt]}'
+    ax_strip.set_title(title, fontsize=10, fontweight='bold', loc='left')
 
-    # ── Pre-compute FN sets for cross-section border colouring ─────────────
-    if comparison_mode and od_outputs is not None and od_outputs2 is not None:
+    # ── Bars
+    _draw_combined_bar(bar_axes[0], labels, 'Ground Truth')
+    _draw_combined_bar(bar_axes[1], _od_to_combined_labels(od_outputs, num_classes), label1)
+    if comparison_mode:
+        _draw_combined_bar(bar_axes[2],
+                           _od_to_combined_labels(od_outputs2, num_classes2), label2)
+
+    # ── Legend (paper colours, attached to GT bar)
+    legend_patches = [mpatches.Patch(facecolor=c, label=n) for c, n in PAPER_LEGEND]
+    bar_axes[0].legend(handles=legend_patches, loc='upper right',
+                       fontsize=7, ncol=len(legend_patches),
+                       framealpha=0.85, borderpad=0.4)
+
+    # ── TP/FN detection for cross-section border styling
+    if od_outputs is not None:
         _, fn_idx1, _, _, _ = match_predictions_to_gt(
-            od_outputs,  segments, num_classes,  D, iou_thresh=iou_threshold)
+            od_outputs, segments, num_classes, D, iou_thresh=iou_threshold)
+    else:
+        fn_idx1 = set()
+    if comparison_mode and od_outputs2 is not None:
         _, fn_idx2, _, _, _ = match_predictions_to_gt(
             od_outputs2, segments, num_classes2, D, iou_thresh=iou_threshold)
     else:
-        fn_idx1 = set()
         fn_idx2 = set()
 
-    # ── Cross-section panels ───────────────────────────────────────────────
+    # ── Cross-section panels
     for col, (z_idx, raw_lbl) in enumerate(cs_positions):
-        ax_cs = fig.add_subplot(gs[cs_row, col])
+        ax_cs  = fig.add_subplot(gs[cs_row_idx, col])
         cs_img = normalize_ct_data(volume[z_idx], hu_min=HU_MIN, hu_max=HU_MAX)
         ax_cs.imshow(cs_img, cmap='gray', vmin=0, vmax=1, origin='upper')
+        ax_cs.set_xticks([])
+        ax_cs.set_yticks([])
 
-        # Find which segment this cross-section belongs to
         seg_idx = None
         for si, (s, e, _) in enumerate(segments):
             if s <= z_idx < e:
                 seg_idx = si
                 break
 
-        # Border colour encoding:
-        #   green  = both models detected the segment (both TP)
-        #   orange = model 1 missed but model 2 caught (improvement from fine-tuning)
-        #   red    = both models missed (FN in both)
-        #   purple = model 1 caught but model 2 missed (regression)
-        #   white  = no GT at this position
-        if seg_idx is None or raw_lbl == 0:
-            border_colour = 'white'
-        elif seg_idx in fn_idx1 and seg_idx not in fn_idx2:
-            # model 1 missed it, model 2 caught it — improvement!
-            border_colour = 'orange'
-        elif seg_idx in fn_idx1 and seg_idx in fn_idx2:
-            # both models missed it
-            border_colour = 'red'
-        elif seg_idx not in fn_idx1 and seg_idx in fn_idx2:
-            # model 1 caught it, model 2 missed it — regression
-            border_colour = 'purple'
-        else:
-            # both models caught it
-            border_colour = 'green'
+        border_c  = RAW_BAR_COLOURS.get(raw_lbl, 'white')
+        lw        = 3
+        linestyle = '-'
+        if seg_idx is not None and raw_lbl != 0:
+            if comparison_mode:
+                if seg_idx in fn_idx1 and seg_idx in fn_idx2:
+                    linestyle = '--'   # both models missed
+                elif seg_idx in fn_idx1:
+                    lw = 5             # model 2 caught what model 1 missed
+            elif seg_idx in fn_idx1:
+                linestyle = '--'       # single-model miss
 
-        title_colour = RAW_LABEL_COLOURS.get(raw_lbl) or 'white'
-        ax_cs.set_title(f'z={z_idx}  raw={raw_lbl}',
-                        color=title_colour, fontsize=9)
-
-        # Show coloured border without hiding axes via axis('off')
-        ax_cs.set_xticks([])
-        ax_cs.set_yticks([])
         for spine in ax_cs.spines.values():
             spine.set_visible(True)
-            spine.set_edgecolor(border_colour)
-            spine.set_linewidth(3)
+            spine.set_edgecolor(border_c)
+            spine.set_linewidth(lw)
+            spine.set_linestyle(linestyle)
+        ax_cs.set_title(f'z={z_idx}', color=border_c, fontsize=8)
 
-    # Fill remaining columns with blank axes
+    # Fill unused columns
     for col in range(len(cs_positions), n_cs):
-        ax_blank = fig.add_subplot(gs[cs_row, col])
-        ax_blank.axis('off')
+        fig.add_subplot(gs[cs_row_idx, col]).axis('off')
 
-    plt.savefig(save_path, bbox_inches='tight', dpi=100)
+    plt.savefig(save_path, bbox_inches='tight', dpi=120)
     plt.close(fig)
+
 
 
 def decode_label_segments(labels):
