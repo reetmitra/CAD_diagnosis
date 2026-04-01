@@ -541,15 +541,17 @@ def load_volume_and_labels(vol_path, sten_path=None, plaq_path=None, comb_path=N
 
     # Load volume
     img = nib.load(vol_path)
-    vol = img.get_fdata()                 # may be (64, 64, 256) or (256, 64, 64) or (95,95,N)
-    if vol.shape[0] == vol.shape[1]:      # (H, W, D) → transpose to (D, H, W)
+    vol = img.get_fdata()                 # may be (H, W, D) or (D, H, W)
+    # NIfTI stores (H, W, D); transpose to (D, H, W) when depth is the last (largest) dim.
+    # Use vessel-axis check (same as augmentation.py) — avoids false trigger on 95×95 cross-sections.
+    if vol.shape[2] > vol.shape[0]:
         vol = vol.transpose(2, 0, 1)
 
-    # Resize volume to (256, 64, 64) if needed
+    # Resize to model input shape — must match opt.net_params["input_shape"] = [256, 64, 64]
     target_shape = (256, 64, 64)
-    if list(vol.shape) != target_shape:
+    if list(vol.shape) != list(target_shape):
         zf = [target_shape[i] / vol.shape[i] for i in range(3)]
-        vol = zoom(vol, zf, order=1)
+        vol = zoom(vol, zf, order=3)
 
     # Load labels
     if comb_path is not None:

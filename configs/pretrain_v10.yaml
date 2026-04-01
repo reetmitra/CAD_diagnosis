@@ -1,0 +1,47 @@
+# SC-Net v10 pre-training — first clean run with all fixes:
+#   - Temporal transformer active (fixed sequence length bug)
+#   - Data pipeline fixes (dims, label remap, NIfTI transpose, cubic zoom)
+#   - Ordinal EMD loss on 3-class SC head
+#   - augment: false (CDA is offline)
+#
+# Usage (single GPU):
+#   python train.py --config configs/pretrain_v10.yaml
+#
+# Usage (2x GPU — recommended):
+#   torchrun --nproc_per_node=2 train.py --distributed --config configs/pretrain_v10.yaml
+
+pattern: pre_training
+data_root: ./dataset/train
+epochs: 200
+lr: 1.0e-4
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+ema_decay: 0.999
+delta: 1.0
+augment: false
+amp: true
+ema: true
+layerwise_lr: true
+sc_class_weight: true
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+num_workers: 8
+seed: 42
+
+# Ordinal EMD loss — penalises Healthy↔Significant errors more than adjacent ones
+ordinal_weight: 0.5
+
+# Transformer architecture
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging and checkpoints
+checkpoint_dir: ./checkpoints_v10
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10

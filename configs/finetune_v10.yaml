@@ -1,0 +1,83 @@
+# SC-Net v10 fine-tuning — from v10 pre-trained checkpoint
+#
+# Carries forward all v9 improvements:
+#   - Cosine warm restarts (T0=60, ×2 per restart)
+#   - SWA from epoch 120
+#   - Ordinal EMD loss (weight=0.5)
+#   - L_dc warm-up (hold=20, ramp=30)
+#   - Balanced sampling + confidence-gated pseudo-labels
+#   - Focal loss (gamma=2.0 — 3.0 destabilises SC branch, per v8 results)
+#
+# Usage (2x GPU — recommended):
+#   torchrun --nproc_per_node=2 train.py --distributed \
+#     --config configs/finetune_v10.yaml \
+#     --pretrained ./checkpoints_v10/best_model.pth
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 250
+lr: 3.0e-5
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+# LR schedule: cosine warm restarts
+lr_schedule: cosine_warm_restarts
+lr_t0: 60
+lr_t_mult: 2
+
+# SWA: average weights from ep120 onward
+swa: true
+swa_start_epoch: 120
+
+# L_dc warm-up (same proven schedule as v7/v9)
+dc_warmup_hold: 20
+dc_warmup_ramp: 30
+delta: 1.0
+dc_confidence_threshold: 0.3
+soft_dc: true
+label_smoothing: 0.1
+
+# Ordinal loss
+ordinal_weight: 0.5
+
+# Early stopping
+patience: 60
+min_delta: 0.001
+
+# Class imbalance handling
+balanced_sampling: true
+sc_class_weight: true
+boost_nonsig: true
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.15
+
+# Effective batch = 2 GPU * 2 per GPU * 4 accum = 16
+accumulate_steps: 4
+
+# Training infrastructure
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 4
+seed: 42
+patient_split: true
+split_seed: 42
+
+# Transformer architecture (must match v10 pre-training)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging
+checkpoint_dir: ./checkpoints_v10_finetune
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10

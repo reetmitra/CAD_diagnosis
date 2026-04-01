@@ -1819,3 +1819,296 @@ amp: true, ema: true, augment: true, num_workers: 4
 ```
 
 Launch: `bash scripts/finetune_v7.sh ./checkpoints_v6/best_model.pth`
+Launch: `bash scripts/finetune_v7.sh ./checkpoints_v6/best_model.pth`
+
+---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTINUATION — 2026-04-01
+# All entries below this line record work done from 2026-04-01 onward.
+# Entries above reflect work up to and including the v7 fine-tuning phase.
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+
+## Phase 11: v9 Pre-training, Fine-tuning, and Results (up to 2026-03-23)
+
+*Transferred from `TRAINING_PROGRESS_2026-03-23.md` — recorded 2026-04-01*
+
+### 11.1 Model Comparison Summary
+
+| Metric | v7-ft (baseline) | v9-ft final (ep70) | v9-ft best (ep20) |
+|--------|-----------------|-------------------|------------------|
+| **Stenosis ACC** | 0.580 | **0.645** | 0.615 |
+| **Stenosis F1** | 0.585 | **0.643** | 0.607 |
+| **Stenosis AUC** | 0.713 | **0.803** | 0.784 |
+| **Plaque ACC** | 0.567 | **0.642** | 0.555 |
+| **Plaque F1** | 0.463 | **0.488** | 0.453 |
+| **Plaque AUC** | **0.700** | 0.690 | 0.679 |
+| **SC branch ACC** | **0.814** | 0.322 | 0.318 |
+
+v9-ft final checkpoint is the best model on all primary clinical metrics. SC branch collapsed in v9 fine-tuning (root cause below).
+
+Calibration: constrained 3D threshold search (`--constrain_nonsig_recall 0.10`) for v7-ft; raw argmax + per-class thresholds for v9-ft.
+
+### 11.2 v9-ft Final (epoch 70) — Full Metrics
+
+#### Stenosis Classification (Healthy / Non-significant / Significant)
+
+| Class | Precision | Recall | F1 | AUC | Support |
+|-------|-----------|--------|----|-----|---------|
+| Healthy | 0.703 | 0.827 | 0.760 | 0.916 | 871 |
+| Non-significant | 0.495 | 0.488 | 0.491 | 0.632 | 944 |
+| Significant | 0.725 | 0.636 | 0.678 | 0.859 | 1146 |
+| **Macro avg** | 0.641 | 0.650 | **0.643** | **0.803** | 2961 |
+
+ACC: **0.645** | Spec: 0.823
+
+#### Plaque Classification (Calcified / Non-calcified / Mixed)
+
+| Class | Precision | Recall | F1 | AUC | Support |
+|-------|-----------|--------|----|-----|---------|
+| Calcified | 0.729 | 0.831 | 0.776 | 0.694 | 1328 |
+| Non-calcified | 0.454 | 0.320 | 0.375 | 0.654 | 541 |
+| Mixed | 0.332 | 0.294 | 0.312 | 0.723 | 221 |
+| **Macro avg** | 0.505 | 0.481 | **0.488** | **0.690** | 2090 |
+
+ACC: **0.642** | Spec: 0.753
+
+#### SC Branch
+ACC: **0.322** (953/2961 points correct)
+
+### 11.3 v9-ft Best (epoch 20) — Full Metrics
+
+#### Stenosis
+
+| Class | Precision | Recall | F1 | AUC | Support |
+|-------|-----------|--------|----|-----|---------|
+| Healthy | 0.686 | 0.683 | 0.685 | 0.881 | 871 |
+| Non-significant | 0.457 | 0.418 | 0.437 | 0.627 | 944 |
+| Significant | 0.676 | 0.725 | 0.699 | 0.843 | 1146 |
+| **Macro avg** | 0.606 | 0.609 | **0.607** | **0.784** | 2961 |
+
+ACC: **0.615**
+
+#### Plaque
+
+| Class | Precision | Recall | F1 | AUC | Support |
+|-------|-----------|--------|----|-----|---------|
+| Calcified | 0.770 | 0.621 | 0.688 | 0.691 | 1328 |
+| Non-calcified | 0.361 | 0.510 | 0.423 | 0.637 | 541 |
+| Mixed | 0.231 | 0.267 | 0.248 | 0.709 | 221 |
+| **Macro avg** | 0.454 | 0.466 | **0.453** | **0.679** | 2090 |
+
+ACC: **0.555**
+
+#### SC Branch
+ACC: **0.318** (941/2961 points correct)
+
+### 11.4 Calibration Thresholds
+
+| Model | Stenosis thresholds [H, NS, Sig] | Plaque thresholds [Calc, NonCalc, Mixed] |
+|-------|----------------------------------|------------------------------------------|
+| v9-ft final (constrained) | [2.80, 0.65, 0.40] → val F1=0.661 | [0.958, 0.619, 0.944] |
+| v9-ft best (constrained) | [1.80, 1.15, 1.00] → val F1=0.673 | [0.729, 0.456, 0.456] |
+| v7-ft (reference) | [2.20, 0.35, 0.25] | [1.42, 0.78, 1.19] |
+
+**Note:** Best checkpoint selection by val_loss is misleading when DC loss activates (~epoch 21). val_loss rises artificially while F1 continues improving. Epoch 70 final model consistently outperforms epoch 20 best-by-val-loss on all primary metrics.
+
+### 11.5 SC Branch Collapse — Root Cause Analysis
+
+**Problem:** SC branch collapsed from 0.814 ACC (v7-ft) to 0.322 ACC (v9-ft) despite v9 achieving superior OD metrics.
+
+**Root Cause: Learning rate mismatch (6× difference)**
+- v9-ft uses LR = 3e-05 (aggressive, designed for strong pre-trained features)
+- v7-ft uses LR = 5e-06 (conservative, allows gradual learning)
+- The SC classification head is **randomly re-initialized** during fine-tuning due to 3→6 class expansion (by design in paper code)
+- With 6× higher LR, SC head gradients diverge during early epochs — the random initialization never stabilizes
+
+**3-phase investigation:**
+1. **Phase 1a:** Both v9 and v6 pre-trained models show weak SC (~0.30) → confirms SC head re-init is the mechanism
+2. **Phase 1b:** Fine-tuning without DC loss yields only 0.02 improvement (0.322→0.342) → DC is not the culprit
+3. **Phase 1c:** v9's 6× higher LR identified as the root cause
+
+**Proposed solution: v9-HYBRID configuration**
+- Use v9's pre-trained backbone (better OD: stenosis ACC 0.645)
+- Use v7's conservative hyperparameters: LR=5e-06, warmup=5 epochs, accumulate=2 steps
+- Hypothesis: SC ACC should recover to 0.70–0.80 while maintaining v9's OD improvements
+- Status at 2026-03-23: training in progress (epoch 16/100)
+
+**Clinical impact:** SC collapse does NOT affect clinical metrics (stenosis/plaque ACC/F1/AUC). v9-ft remains best on OD. v9-HYBRID expected to maximize both branches.
+
+### 11.6 Checkpoint Files (as of 2026-03-23)
+
+| Checkpoint | Path | Status |
+|-----------|------|--------|
+| v9-ft final | `checkpoints_v9_finetune/final_model.pth` | Complete (epoch 70, early-stopped) |
+| v9-ft best-loss | `checkpoints_v9_finetune/best_model.pth` | Complete (epoch 20) |
+| v7-ft (SC baseline) | `checkpoints_v7_finetune/final_model.pth` | Complete (epoch 49) |
+| v9-nonsig | `checkpoints_v9_nonsig/` | Running at 2026-03-23 (epoch 15/200) |
+
+---
+
+## Phase 12: Architecture, Training, and Data Pipeline Fixes (2026-03-31 to 2026-04-01)
+
+### 12.1 Critical Architecture Fix — Temporal Transformer Was Disabled
+
+**File:** `architecture.py` | **Commit:** `1b22c07`
+
+**Bug:** `temporal_semantic_learning.forward()` reshaped cubes to `[(B × n_cubes), 1, D, H, W]` before passing to `_3dcnn`, then passed that flat batch straight to the transformer. Because the rearrange collapsed the sequence dimension, the transformer saw sequences of length 1 — it was effectively disabled. The model was operating as a bag-of-independent-cubes classifier despite having a transformer encoder.
+
+**Fix:** Pass `[B, n_cubes, D, H, W]` directly to `_3dcnn`. The `Conv3d` module was already designed to accept this format — it rearranges internally to `[(B×n), 1, D, H, W]`, applies conv layers, and reshapes back to `[B, n, C_out, d', h', w']`. The temporal transformer now correctly attends across all 32 cube positions simultaneously.
+
+**Impact:** Every existing checkpoint is parameter-shape compatible, but temporal branch quality will differ in inference until retrained. This is the single most significant fix — prior training runs were running the temporal branch without cross-cube attention.
+
+### 12.2 Eval Split Was Using Test Data
+
+**Files:** `train.py`, `framework.py` | **Commit:** `1b22c07`
+
+`Trainer.setup_data()` passed `pattern='eval'` which mapped to the **test split** (last 15%), not validation. Early stopping was being monitored on test data — contaminating the test set.
+
+Fixes:
+- `framework.py:169`: Added `self.eval_indices = val_idx` alias
+- `train.py:388`: Changed `pattern='eval'` → `pattern='validation'`
+
+### 12.3 Balanced Sampling Used Deleted API
+
+**File:** `train.py` | **Commit:** `1b22c07`
+
+`_compute_sample_weights()` referenced `dataset.labels_file_list` which was removed when the new-format dataset support was added. Rewritten to use `dataset.file_pairs` with `merge_new_labels` for new-format datasets.
+
+### 12.4 `build_param_groups` Keyword Mismatch
+
+**File:** `scheduler_utils.py` | **Commit:** `1b22c07`
+
+The keyword patterns used to assign LR tiers did not match actual SC-Net parameter names. `temporal_correlation_analysis` (the transformer encoder) was receiving 0.1× backbone LR instead of 0.5× transformer LR. `query_pos` (learnable DETR queries) was also getting backbone LR. Updated keywords to match actual dotted parameter names from `model.named_parameters()`. Head-check order also corrected (heads evaluated before transformers).
+
+### 12.5 New Features Added
+
+**Ordinal EMD Loss** (`optimization.py`):
+New `OrdinalEMDLoss` class using Squared Earth Mover's Distance over cumulative class distributions (Hou et al., arXiv:1611.05916). Penalises Healthy↔Significant errors ~2× more than adjacent-class errors, proportional to ordinal distance. Controlled via `--ordinal_weight` (0=disabled, 0.3–0.5 recommended). Wired through `sampling_point_classification_loss` → `spatio_temporal_contrast_loss` → `framework`.
+
+**Cosine Warm Restarts** (`scheduler_utils.py`):
+New `CosineAnnealingWarmRestarts` wrapper with linear warmup support. Use `--lr_schedule cosine_warm_restarts --lr_t0 60 --lr_t_mult 2`. Default remains `cosine` (backward compatible).
+
+**Stochastic Weight Averaging** (`train.py`):
+`--swa` flag using `torch.optim.swa_utils.AveragedModel`. Starts averaging from `--swa_start_epoch` (default: epochs//2). BatchNorm statistics updated at training end. Saves `swa_model.pth` alongside `final_model.pth`.
+
+### 12.6 Updated Configs
+
+| Config | Key settings |
+|--------|-------------|
+| `configs/finetune_v9.yaml` | 250 epochs, cosine warm restarts (T0=60, ×2), SWA from ep120, ordinal_weight=0.5, boost_nonsig=true |
+| `configs/finetune_v9_nonsig.yaml` | 200 epochs, standard cosine, ordinal_weight=0.3, conservative parallel run |
+
+---
+
+## Phase 13: Data Pipeline Correctness Fixes (2026-04-01)
+
+**File:** `augmentation.py`, `train.py`, `configs/pretrain_default.yaml` | **Commit:** `631c3a7`
+
+These fixes address root-cause data integrity issues that would produce silently wrong volumes and labels fed to the model.
+
+### 13.1 `data_resize` — Full Shape Check
+
+**Bug:** Early-exit check `if data.shape[0] == self.input_shape[0]` only compared the depth dimension. A volume with the correct depth (256) but wrong cross-section size (e.g. 95×95 instead of 64×64) would pass through unresized, causing shape mismatches deep in the network.
+
+**Fix:** `if list(data.shape) == list(self.input_shape)` — all three dimensions checked.
+
+### 13.2 Label Resize Interpolation Order
+
+**Bug:** `zoom(label, ..., order=1)` uses linear interpolation on discrete integer labels, producing invalid fractional class values (e.g. 1.5, 2.7) that get rounded unpredictably.
+
+**Fix:** `order=0` (nearest-neighbour) throughout — correct for categorical data.
+
+### 13.3 Hardcoded `(256, 64, 64)` and `256` in `data_generator`
+
+**Bug:** `np.full((256, 64, 64), -1024, ...)` and `next_idx < 256` hardcoded the expected input shape. Running on a different input shape (e.g. the 95×95 dataset) would silently produce incorrectly-sized outputs.
+
+**Fix:** `np.full(self.input_shape, ...)` and `next_idx < self.input_shape[0]`.
+
+### 13.4 Double Label Remapping
+
+**Bug:** `data_generator` applied `((ret_label - 1) % 3) + 1` — a hardcoded 3-class remap. `__getitem__` then applied the same remap a second time via `num_classes`. For 3-class pre-training the labels were remapped twice; for 6-class fine-tuning they were incorrectly collapsed.
+
+**Fix:** Removed the remap from `data_generator`. `__getitem__` remains the single point of remapping, correctly conditioned on `self.num_classes`.
+
+### 13.5 NIfTI Transpose Heuristic
+
+**Bug (CDA path):** `read_data` unconditionally transposed all volumes with `.transpose(2, 0, 1)` — if a volume was already in (D, H, W) order it would be doubly transposed, producing a mangled spatial layout.
+
+**Bug (dataset path):** `vol.shape[0] == vol.shape[1]` checked whether the first two axes are equal, which is true for square cross-sections but could also accidentally trigger for volumes where D==H.
+
+**Fix (both paths):** `if vol.shape[2] > vol.shape[0]` — explicitly tests that the last axis (vessel depth) is larger, which is the reliable indicator of (H, W, D) NIfTI storage order.
+
+### 13.6 Volume Resize Interpolation Order
+
+**Bug:** `cubic_sequence_data.read_data` used `zoom(..., order=1)` (bilinear) while `clinically_credible_augmentation.data_resize` used `order=3` (cubic). Inconsistent quality between the two load paths.
+
+**Fix:** Upgraded to `order=3` throughout for consistent bicubic quality matching the CDA path.
+
+### 13.7 `online_augment` — Destructive Augmentations Removed
+
+**Bug:** `online_augment` included random erasing (cutout), Gaussian blur, Gaussian noise, and contrast scaling. These operations:
+- Random erasing: can mask the exact lesion region the temporal branch (3D cubes) classifies and the OD branch detects — training the model to ignore the region it needs to see
+- Gaussian blur: degrades the high-frequency calcification/plaque texture features that distinguish plaque types
+- None of these are mentioned in the paper; only CDA (offline foreground/background splicing) is described
+
+**Fix:** Reduced to three paper-safe operations: axial rotation (same angle across all depth slices), depth flip (labels follow), and global intensity shift (preserves relative HU contrast).
+
+### 13.8 Pre-training Config — `augment: false`
+
+**Bug:** `configs/pretrain_default.yaml` had `augment: true`. CDA is an offline augmentation step (run once to generate synthetic data before training). Online augmentation during pre-training was not intended by the paper.
+
+**Fix:** `augment: false`. CDA-generated data is already in the training directory.
+
+### 13.9 `num_classes` Hardcoding in `train.py`
+
+**Bug:** `self.num_classes = 3 if args.pattern == 'pre_training' else 6` — if `config.py` is ever changed (e.g. to add a new class), `train.py` would silently use the wrong value while `framework.py` correctly reads from config.
+
+**Fix:** Reads from `opt.net_params["num_classes"][0]` (pre-training) / `[1]` (fine-tuning), consistent with `framework.py`.
+
+---
+
+## Phase 14: Visualisation — Match Paper Figure 3 Layout (2026-04-01)
+
+**File:** `visualize.py` | **Commit:** `6cb9742`
+
+The previous visualization used a layout that did not match Figure 3 of the paper, making it difficult to compare model outputs to the published results.
+
+### 14.1 Changes Made
+
+**CPR Strip — Thin MIP:**
+Previously used a single pixel row (`volume[:, cy, :]`), which is very noisy. Changed to a 5-row maximum intensity projection (`volume[:, cy-2:cy+3, :].max(axis=1)`) — less noise, more representative of the vessel lumen appearance shown in the paper.
+
+**Sampling Point Markers:**
+Added red × markers at the 32 cube positions (step=8, starting at step//2−1), matching the red × symbols shown in Figure 3. These indicate where the temporal branch samples along the vessel axis.
+
+**Bar Layout — Stacked Full-Width Rows:**
+Old layout: 4 bars split at the column midpoint (GT stenosis | Pred stenosis / GT plaque | Pred plaque) — each bar was half the width of the CPR strip and difficult to compare spatially.
+
+New layout: One combined bar per model (Ground Truth / Model 1 / [Model 2]), each the full width of the CPR strip, stacked top-to-bottom — exactly matching Figure 3.
+
+**Single Combined Bar:**
+Each bar encodes both stenosis severity and plaque type simultaneously in one colour per raw label 0–6, matching the paper's single-bar legend. The old split stenosis/plaque bars required the viewer to mentally combine two separate rows.
+
+**Colour Scheme — Paper Legend:**
+Old colours: gradients of gold/orange/red for labels 1–6; grey for healthy.
+New `RAW_BAR_COLOURS`: exact paper colours:
+
+| Label | Condition | Colour |
+|-------|-----------|--------|
+| 0 | No-lesion | Green `#4CAF50` |
+| 1 | Non-sig + Calcified | Yellow `#FFD700` |
+| 2 | Non-sig + Non-calcified | Pink `#FF80AB` |
+| 3 | Non-sig + Mixed | Purple `#9C27B0` |
+| 4 | Significant + Calcified | Orange `#FF6600` |
+| 5 | Significant + Non-calcified | Orange-pink `#FF6680` |
+| 6 | Significant + Mixed | Dark-red `#CC3300` |
+
+**Cross-Section Borders:**
+Previously coloured by detection outcome (green/orange/red/purple). Now coloured by the raw label class of the lesion at that position — matching the paper where cross-section borders are the same colour as the label bar at that location. Detection status (missed/detected) is encoded via solid vs. dashed border style.
+
+**Removed Dead Code:**
+Removed `_draw_label_bar`, `_draw_semantic_bar`, `_extract_per_slice_predictions` inner helpers and `RAW_LABEL_COLOURS`, `STEN_BAR_COLOURS`, `PLAQ_BAR_COLOURS` constants — replaced by `RAW_BAR_COLOURS` and `PAPER_LEGEND`.
+
