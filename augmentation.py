@@ -26,14 +26,15 @@ class clinically_credible_augmentation(nn.Module):
         data, label = original_data['cpr_volume'], original_data['label']
         inp_size = data.shape
 
-        if data.shape[0] == self.input_shape[0]:
+        # Check all three dimensions — depth-only check misses wrong H/W
+        if list(data.shape) == list(self.input_shape):
             return original_data
 
         data_zoom_factors = (
         self.input_shape[0] / inp_size[0], self.input_shape[1] / inp_size[1], self.input_shape[2] / inp_size[2])
         resized_data = zoom(data, data_zoom_factors, order=3)
         label_zoom_factors = (self.input_shape[0] / inp_size[0])
-        resized_label = zoom(label, label_zoom_factors, order=1)
+        resized_label = zoom(label, label_zoom_factors, order=0).astype(np.int32)
         return {"cpr_volume": resized_data, "label": resized_label}
 
     def data_generator(self, foreground_data, background_data, blend_margin=3):
@@ -43,7 +44,7 @@ class clinically_credible_augmentation(nn.Module):
         f_data, f_label = foreground_data['cpr_volume'], foreground_data['label']
         b_data, b_label = background_data['cpr_volume'], background_data['label']
 
-        ret_data = np.full((256, 64, 64), -1024, dtype=np.float64)
+        ret_data = np.full(self.input_shape, -1024, dtype=np.float64)
         ret_label = f_label
         b_indices = np.where(b_label == 0)[0]
         ret_data[b_indices, :, :] = b_data[b_indices, :, :]
@@ -77,11 +78,12 @@ class clinically_credible_augmentation(nn.Module):
                         ret_data[prev_idx] = (1 - alpha) * ret_data[prev_idx] + alpha * ret_data[idx]
                     # Blend at the end of foreground
                     next_idx = idx + offset
-                    if next_idx < 256 and next_idx not in f_set:
+                    if next_idx < self.input_shape[0] and next_idx not in f_set:
                         alpha = 0.5 * (1 + np.cos(np.pi * offset / blend_margin))
                         ret_data[next_idx] = (1 - alpha) * ret_data[next_idx] + alpha * ret_data[idx]
 
-        ret_label = np.where(ret_label > 0, ((ret_label - 1) % 3) + 1, ret_label)
+        # Label remapping (3-class vs 6-class) is handled downstream in __getitem__
+        # based on num_classes — do not remap here to avoid double-remapping.
         return {'cpr_volume': ret_data.astype(np.int32), 'label': ret_label}
 
     def read_data(self, volumes_file, labels_file):
@@ -89,7 +91,9 @@ class clinically_credible_augmentation(nn.Module):
         nii_file = nib.load(volumes_file)
         affine_matrix = nii_file.affine
         ret_volumes = nii_file.get_fdata()
-        ret_volumes = ret_volumes.transpose(2, 0, 1)
+        # NIfTI stores (H, W, D); transpose to (D, H, W) when depth is last
+        if ret_volumes.shape[2] > ret_volumes.shape[0]:
+            ret_volumes = ret_volumes.transpose(2, 0, 1)
         ret_volumes = np.array(ret_volumes)
         ret_labels = np.loadtxt(labels_file).astype(np.int32)
 
@@ -135,7 +139,13 @@ class clinically_credible_augmentation(nn.Module):
 
 
 def online_augment(volume, labels):
-    """Apply random online augmentations to a numpy volume and labels array.
+    """Apply mild online augmentations to a numpy volume and its per-slice labels.
+
+    Only augmentations that preserve lesion spatial structure are applied here.
+    Heavy offline augmentation (lesion splicing) is handled by
+    clinically_credible_augmentation.  Destructive operations (random erasing,
+    blur) are intentionally excluded — they corrupt the 3-D cube regions that
+    the temporal branch classifies and can mask OD targets.
 
     Args:
         volume: numpy array of shape [D, H, W]
@@ -144,50 +154,21 @@ def online_augment(volume, labels):
     Returns:
         Augmented volume and labels (numpy arrays).
     """
-    # Random rotation along vessel axis (Z) — same angle for all axial slices
+    # Axial rotation — rotate each slice by the same angle so vessel stays aligned
     if random.random() < 0.5:
         angle = random.uniform(-15, 15)
         for d in range(volume.shape[0]):
             volume[d] = rotate(volume[d], angle, reshape=False, order=1)
 
-    # Intensity jitter — uniform offset in [-50, +50] HU
-    if random.random() < 0.5:
-        offset = random.uniform(-50, 50)
-        volume = volume + offset
-
-    # Random flip along depth (axis 0), also reverse labels
+    # Depth flip — reverse vessel direction; labels must follow
     if random.random() < 0.5:
         volume = np.flip(volume, axis=0).copy()
         labels = np.flip(labels, axis=0).copy()
 
-    # Gaussian noise injection
-    if random.random() < 0.3:
-        noise_std = random.uniform(5, 25)  # HU-scale noise
-        noise = np.random.normal(0, noise_std, volume.shape).astype(volume.dtype)
-        volume = volume + noise
-
-    # Gaussian blur (simulate lower resolution / motion)
-    if random.random() < 0.2:
-        from scipy.ndimage import gaussian_filter
-        sigma = random.uniform(0.3, 1.0)
-        volume = gaussian_filter(volume, sigma=sigma)
-
-    # Intensity scaling (contrast adjustment)
-    if random.random() < 0.3:
-        scale = random.uniform(0.85, 1.15)
-        mean_val = volume.mean()
-        volume = (volume - mean_val) * scale + mean_val
-
-    # Random erasing (cutout) — mask a small random region to zero
-    if random.random() < 0.2:
-        D, H, W = volume.shape
-        erase_d = random.randint(D // 16, D // 4)
-        erase_h = random.randint(H // 4, H // 2)
-        erase_w = random.randint(W // 4, W // 2)
-        d0 = random.randint(0, max(D - erase_d, 1))
-        h0 = random.randint(0, max(H - erase_h, 1))
-        w0 = random.randint(0, max(W - erase_w, 1))
-        volume[d0:d0+erase_d, h0:h0+erase_h, w0:w0+erase_w] = 0
+    # Intensity shift — global HU offset, preserves relative tissue contrast
+    if random.random() < 0.5:
+        offset = random.uniform(-50, 50)
+        volume = volume + offset
 
     return volume, labels
 
@@ -302,16 +283,18 @@ class cubic_sequence_data(data.Dataset):
             comb_path: path to combined label or None
         """
         # Load volume
+        # NIfTI stores axes as (X, Y, Z) = (H, W, D) so shape[-1] is the vessel-axis depth.
+        # Transpose to (D, H, W) when depth is the last (largest) dimension.
         nii_file = nib.load(vol_path)
         vol = nii_file.get_fdata()
-        if vol.shape[0] == vol.shape[1]:  # (H, W, D) → (D, H, W)
+        if vol.shape[2] > vol.shape[0]:  # (H, W, D) → (D, H, W)
             vol = vol.transpose(2, 0, 1)
 
-        # Resize volume to input_shape if needed
+        # Resize volume to input_shape if needed (order=3 cubic, same as CDA path)
         target = self.input_shape
         if list(vol.shape) != target:
             zf = [target[i] / vol.shape[i] for i in range(3)]
-            vol = zoom(vol, zf, order=1)
+            vol = zoom(vol, zf, order=3)
 
         # Load labels
         if comb_path is not None:

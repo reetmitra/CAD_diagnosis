@@ -269,7 +269,11 @@ class Trainer:
         self.is_main = (self.rank == 0)
 
         # ---- num_classes (needed for metrics) ----
-        self.num_classes = 3 if args.pattern == 'pre_training' else 6
+        # Mirror framework.py: pre_training uses index [0], fine_tuning uses index [1]
+        if args.pattern == 'pre_training':
+            self.num_classes = opt.net_params["num_classes"][0]
+        else:
+            self.num_classes = opt.net_params["num_classes"][1]
 
         # ---- build components ----
         self.setup_model()

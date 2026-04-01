@@ -10,7 +10,7 @@ grad_clip: 0.1
 warmup_epochs: 10
 ema_decay: 0.999
 delta: 1.0
-augment: true
+augment: false  # CDA (clinically_credible_augmentation) handles offline augmentation; no online augment during pre-training
 amp: true
 ema: true
 layerwise_lr: true
