@@ -146,8 +146,10 @@ class HungarianMatcher(nn.Module):
             return [(torch.empty(0, dtype=torch.int64), torch.empty(0, dtype=torch.int64)) for _ in range(bs)]
 
         cost_class = -out_prob[:, tgt_ids]
-        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        out_se = box_cxw_to_se(out_bbox)
+        tgt_se = box_cxw_to_se(tgt_bbox)
+        cost_bbox = torch.cdist(out_se, tgt_se, p=1)
+        cost_giou = -generalized_box_1d_iou(out_se, tgt_se)
 
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(bs, num_queries, -1).cpu()
@@ -601,6 +603,48 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
         return _new_empty_tensor(input, output_shape)
     else:
         return torchvision.ops.misc.interpolate(input, size, scale_factor, mode, align_corners)
+
+
+def box_cxw_to_se(x):
+    """Convert 1D boxes from [cx, w] to [start, end] format."""
+    cx, w = x.unbind(-1)
+    return torch.stack([cx - 0.5 * w, cx + 0.5 * w], dim=-1)
+
+
+def box_1d_iou(boxes1, boxes2):
+    """1D interval IoU for boxes in [start, end] format.
+
+    Args:
+        boxes1: (N, 2) tensor [start, end]
+        boxes2: (M, 2) tensor [start, end]
+    Returns:
+        iou:   (N, M) IoU matrix
+        union: (N, M) union lengths
+    """
+    len1 = (boxes1[:, 1] - boxes1[:, 0]).clamp(min=0)        # (N,)
+    len2 = (boxes2[:, 1] - boxes2[:, 0]).clamp(min=0)        # (M,)
+    inter_start = torch.max(boxes1[:, None, 0], boxes2[None, :, 0])  # (N, M)
+    inter_end   = torch.min(boxes1[:, None, 1], boxes2[None, :, 1])  # (N, M)
+    inter = (inter_end - inter_start).clamp(min=0)
+    union = len1[:, None] + len2[None, :] - inter
+    iou = inter / union.clamp(min=1e-6)
+    return iou, union
+
+
+def generalized_box_1d_iou(boxes1, boxes2):
+    """1D Generalised IoU returning an (N, M) matrix.
+
+    Matches the interface of generalized_box_iou so it can be used as a
+    drop-in replacement in the Hungarian matcher and loss_boxes.
+    """
+    # Clamp degenerate boxes (end < start can arise from pseudo-targets)
+    boxes1 = torch.stack([boxes1[:, 0], torch.max(boxes1[:, 1], boxes1[:, 0])], dim=-1)
+    boxes2 = torch.stack([boxes2[:, 0], torch.max(boxes2[:, 1], boxes2[:, 0])], dim=-1)
+    iou, union = box_1d_iou(boxes1, boxes2)                              # (N, M)
+    hull_start = torch.min(boxes1[:, None, 0], boxes2[None, :, 0])       # (N, M)
+    hull_end   = torch.max(boxes1[:, None, 1], boxes2[None, :, 1])       # (N, M)
+    hull = (hull_end - hull_start).clamp(min=1e-6)
+    return iou - (hull - union) / hull
 
 
 def box_cxcywh_to_xyxy(x):

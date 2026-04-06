@@ -43,9 +43,11 @@ class object_detection_loss(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0).to(src_boxes.device)
-        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
-        loss_giou = 1 - torch.diag(funcs.generalized_box_iou(funcs.box_cxcywh_to_xyxy(src_boxes),
-                                                            funcs.box_cxcywh_to_xyxy(target_boxes)))
+        # Convert [cx, w] → [start, end] for native 1D interval IoU
+        src_se = funcs.box_cxw_to_se(src_boxes)
+        tgt_se = funcs.box_cxw_to_se(target_boxes)
+        loss_bbox = F.l1_loss(src_se, tgt_se, reduction='none')
+        loss_giou = 1 - torch.diag(funcs.generalized_box_1d_iou(src_se, tgt_se))
         # Paper Eq. 5: λ_L1=5, λ_iou=2
         return 5.0 * loss_bbox.sum() / num_boxes + 2.0 * loss_giou.sum() / num_boxes
 
@@ -59,13 +61,9 @@ class object_detection_loss(nn.Module):
 
     def forward(self, outputs, targets):
 
-        # Expand 2D boxes [center, width] to 4D [cx, cy, w, h] for matcher/loss
         device = next(iter(outputs.values())).device
         outputs = {k: v.clone() for k, v in outputs.items()}
         targets = [{k: v.clone().to(device) for k, v in t.items()} for t in targets]
-        if outputs['pred_boxes'].shape[-1] == 2:
-            outputs = funcs.boxes_dimension_expansion(outputs, dtype='outputs')
-            targets = funcs.boxes_dimension_expansion(targets, dtype='targets')
 
         indices = self.matcher(outputs, targets)
 
@@ -335,10 +333,8 @@ class dual_task_contrastive_loss(nn.Module):
 
     def _get_sampling_point_classification_targets(self, od_outputs, od_targets):
 
-        od_outputs = funcs.boxes_dimension_expansion(
-            {k: v.clone() for k, v in od_outputs.items()}, dtype='outputs')
-        od_targets = funcs.boxes_dimension_expansion(
-            [{k: v.clone() for k, v in t.items()} for t in od_targets], dtype='targets')
+        od_outputs = {k: v.clone() for k, v in od_outputs.items()}
+        od_targets = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         indices = self.matcher(od_outputs, od_targets)
         selected_indices = [item[0] for item in indices]
 
@@ -348,7 +344,7 @@ class dual_task_contrastive_loss(nn.Module):
             logits = od_outputs["pred_logits"][batch_idx]
             boxes = od_outputs["pred_boxes"][batch_idx]
             selected_logits = logits[indices]
-            selected_boxes = boxes[indices][:, [0, 2]]
+            selected_boxes = boxes[indices]  # already [cx, w]
 
             # Confidence gating: only use high-confidence predictions
             probs = torch.softmax(selected_logits, dim=1)
@@ -379,10 +375,8 @@ class dual_task_contrastive_loss(nn.Module):
         soft probability distributions for each sampling point based on OD
         prediction confidences. Uses KL divergence as the loss.
         """
-        od_out = funcs.boxes_dimension_expansion(
-            {k: v.clone() for k, v in od_outputs.items()}, dtype='outputs')
-        od_tgt = funcs.boxes_dimension_expansion(
-            [{k: v.clone() for k, v in t.items()} for t in od_targets], dtype='targets')
+        od_out = {k: v.clone() for k, v in od_outputs.items()}
+        od_tgt = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         indices = self.matcher(od_out, od_tgt)
         selected_indices = [item[0] for item in indices]
 
@@ -395,7 +389,7 @@ class dual_task_contrastive_loss(nn.Module):
             logits = od_out["pred_logits"][batch_idx]
             boxes = od_out["pred_boxes"][batch_idx]
             selected_logits = logits[sel_idx]
-            selected_boxes = boxes[sel_idx][:, [0, 2]]  # [cx, w]
+            selected_boxes = boxes[sel_idx]  # already [cx, w]
 
             # Start with uniform background distribution
             soft_target = torch.zeros(self.seq_length, num_sc_classes,
