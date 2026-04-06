@@ -1,0 +1,1210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SC-Net Pipeline Flowchart — CAD Diagnosis from CCTA</title>
+<style>
+/* Import Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
+
+:root {
+  --bg-color: #F8FAFC;
+  --text-main: #0F172A;
+  --text-muted: #64748B;
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 8px 32px rgba(30, 41, 59, 0.05);
+  --card-bg: rgba(255, 255, 255, 0.9);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--bg-color);
+  background-image: 
+    radial-gradient(at 0% 0%, hsla(253,16%,7%,0.02) 0, transparent 50%), 
+    radial-gradient(at 50% 0%, hsla(225,39%,30%,0.02) 0, transparent 50%), 
+    radial-gradient(at 100% 0%, hsla(339,49%,30%,0.02) 0, transparent 50%);
+  color: var(--text-main);
+  min-width: 1280px;
+  line-height: 1.6;
+}
+
+code {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 12px;
+  background: rgba(15, 23, 42, 0.04);
+  color: #0369A1;
+  border: 1px solid rgba(15, 23, 42, 0.05);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-weight: 600;
+}
+
+/* Page Header */
+.page-header {
+  background: white;
+  position: relative;
+  overflow: hidden;
+  text-align: center;
+  padding: 60px 40px 50px;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+  box-shadow: 0 4px 30px rgba(0,0,0,0.03);
+}
+.page-header::before {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(120deg, rgba(56, 189, 248, 0.1), rgba(168, 85, 247, 0.05), rgba(59, 130, 246, 0.1));
+  z-index: 0;
+}
+.page-header h1, .page-header p { position: relative; z-index: 1; }
+.page-header h1 {
+  font-family: 'Outfit', sans-serif;
+  font-size: 38px; font-weight: 800;
+  letter-spacing: -0.5px;
+  background: linear-gradient(135deg, #0F172A, #334155);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 16px;
+}
+.page-header p {
+  font-size: 16px; color: #64748B; font-weight: 500;
+}
+
+/* Legend */
+.legend {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  display: flex; flex-wrap: wrap; gap: 15px 30px;
+  padding: 18px 40px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.03);
+  align-items: center; justify-content: center;
+  position: sticky; top: 0; z-index: 100;
+}
+.legend strong { font-family: 'Outfit', sans-serif; font-size: 14px; color: #0F172A; text-transform: uppercase; letter-spacing: 0.5px; }
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: #475569; }
+.legend-swatch { width: 14px; height: 14px; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex-shrink: 0; border: 1px solid rgba(0,0,0,0.1); }
+
+/* Main Container */
+.flowchart { max-width: 1420px; margin: 40px auto; padding: 0 24px 80px; display: flex; flex-direction: column; gap: 30px; }
+
+/* Phase Block */
+.phase {
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  border-radius: 24px;
+  box-shadow: var(--glass-shadow);
+  overflow: hidden;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.phase:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 40px rgba(30, 41, 59, 0.08);
+}
+.phase-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 20px 28px;
+  color: #0F172A;
+  font-family: 'Outfit', sans-serif;
+  font-size: 18px; font-weight: 700; letter-spacing: -0.2px;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+  position: relative; overflow: hidden;
+  background: rgba(255,255,255,0.9);
+}
+.phase-body { padding: 32px; display: flex; flex-direction: column; gap: 24px; }
+
+/* Arrows */
+.arrow-down { display: flex; flex-direction: column; align-items: center; padding: 0; position: relative; }
+.arrow-down .line { width: 2px; height: 32px; background: linear-gradient(to bottom, #CBD5E1, transparent); }
+.arrow-down .head { display: none; }
+
+/* Grid Layout */
+.row { display: flex; gap: 24px; flex-wrap: wrap; }
+.col { flex: 1; min-width: 250px; display: flex; flex-direction: column; gap: 20px; }
+
+/* Box Element */
+.box {
+  background: var(--card-bg);
+  border: 1px solid rgba(0,0,0,0.05);
+  border-radius: 16px;
+  padding: 24px;
+  font-size: 14px; line-height: 1.6;
+  color: #334155;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px -2px rgba(0, 0, 0, 0.02);
+  transition: all 0.3s ease;
+  position: relative; overflow: hidden;
+}
+.box:hover {
+  box-shadow: 0 12px 24px -4px rgba(0, 0, 0, 0.06);
+  transform: translateY(-2px);
+  border-color: rgba(0,0,0,0.1);
+}
+.box::before {
+  content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%;
+}
+.box-title {
+  font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 16px; color: #0F172A;
+  margin-bottom: 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+}
+.box-note { font-size: 13px; color: #64748B; font-style: italic; margin-top: 14px; padding-top: 14px; border-top: 1px dashed rgba(0,0,0,0.08); }
+
+/* Colored Boxes */
+.box-blue::before { background: #3B82F6; }
+.box-green::before { background: #10B981; }
+.box-purple::before { background: #8B5CF6; }
+.box-red::before { background: #EF4444; }
+.box-orange::before { background: #F59E0B; }
+.box-teal::before { background: #14B8A6; }
+.box-yellow::before { background: #EAB308; }
+.box-gray::before { background: #64748B; }
+.box-dark::before { background: #334155; }
+
+.box-blue { background: linear-gradient(145deg, #ffffff, #F0F9FF); }
+.box-green { background: linear-gradient(145deg, #ffffff, #ECFDF5); }
+.box-purple { background: linear-gradient(145deg, #ffffff, #F5F3FF); }
+.box-red { background: linear-gradient(145deg, #ffffff, #FEF2F2); }
+.box-orange { background: linear-gradient(145deg, #ffffff, #FFFBEB); }
+.box-teal { background: linear-gradient(145deg, #ffffff, #F0FDFA); }
+.box-yellow { background: linear-gradient(145deg, #ffffff, #FEFCE8); }
+.box-gray { background: linear-gradient(145deg, #ffffff, #F8FAFC); }
+.box-dark { background: linear-gradient(145deg, #ffffff, #F1F5F9); }
+
+.box-note-box { border: 1px solid rgba(245, 158, 11, 0.3); background: #FFFBEB; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.05); }
+.box-note-box::before { background: #F59E0B; }
+
+/* Tags */
+.tag {
+  display: inline-flex; align-items: center; color: white; padding: 4px 10px; border-radius: 8px;
+  font-family: 'Outfit', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: transform 0.2s;
+  text-transform: uppercase;
+}
+.tag:hover { transform: scale(1.05); }
+.tag-new   { background: linear-gradient(135deg, #10B981, #059669); }
+.tag-key   { background: linear-gradient(135deg, #E11D48, #BE123C); }
+.tag-fixed { background: linear-gradient(135deg, #F59E0B, #D97706); }
+.tag-arch  { background: linear-gradient(135deg, #8B5CF6, #6D28D9); }
+.tag-info  { background: linear-gradient(135deg, #0EA5E9, #0369A1); }
+
+/* Override specific hardcoded inline styles */
+[style*="background:#FCE4EC"] { background: linear-gradient(145deg, #ffffff, #FEF2F2) !important; border-color: rgba(239, 68, 68, 0.3) !important; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.05) !important; }
+[style*="background:white"] { background: white !important; }
+
+/* Key Lists */
+.kl { margin: 10px 0 4px 12px; list-style: none; }
+.kl li { margin-bottom: 8px; position: relative; padding-left: 18px; }
+.kl li::before { content: ''; position: absolute; left: 0; top: 9px; width: 6px; height: 6px; border-radius: 50%; background: #94A3B8; transition: background 0.2s; }
+.kl li:hover::before { background: #3B82F6; box-shadow: 0 0 8px #3B82F6; }
+.kl li strong { color: #0F172A; font-weight: 600; }
+.kl li em { color: #6D28D9; font-style: normal; font-weight: 500; background: rgba(139, 92, 246, 0.08); padding: 2px 6px; border-radius: 4px; }
+
+/* Dual-branch styling */
+.dual-branch {
+  display: grid; grid-template-columns: 1fr 2px 1fr; gap: 40px; align-items: start;
+  background: white; border: 1px solid rgba(0,0,0,0.05);
+  border-radius: 20px; padding: 40px 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.02);
+}
+.branch-divider { background: linear-gradient(to bottom, transparent, rgba(0,0,0,0.08), transparent); height: 100%; border-radius: 2px; }
+
+.branch-label-left, .branch-label-right {
+  text-align: center; font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 16px;
+  border-radius: 12px; padding: 18px; margin-bottom: 24px;
+}
+.branch-label-left { color: #1E40AF; background: #EFF6FF; border: 1px solid rgba(59, 130, 246, 0.2); box-shadow: 0 4px 12px rgba(59, 130, 246, 0.08); }
+.branch-label-right { color: #9D174D; background: #FFF1F2; border: 1px solid rgba(225, 29, 72, 0.2); box-shadow: 0 4px 12px rgba(225, 29, 72, 0.08); }
+.branch-label-left span, .branch-label-right span { font-weight: 500; font-family: 'Inter', sans-serif; font-size: 12px; display: block; margin-top: 6px; color: currentColor; opacity: 0.8; }
+
+.arch-step {
+  background: white; border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 12px; padding: 20px; margin-bottom: 12px; font-size: 14px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.02); transition: transform 0.2s, box-shadow 0.2s;
+  position: relative;
+}
+.arch-step:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,0.06); border-color: rgba(0,0,0,0.1); }
+.arch-step-t { border-left: 4px solid #3B82F6; }
+.arch-step-s { border-left: 4px solid #F43F5E; }
+.arch-step-num { font-family: 'Outfit', sans-serif; font-weight: 800; font-size: 15px; color: #0F172A; display: inline-block; margin-bottom: 10px; }
+
+.step-down { text-align: center; font-size: 20px; color: #94A3B8; margin: 4px 0; }
+
+.formula {
+  font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
+  background: rgba(15, 23, 42, 0.03); border: 1px solid rgba(0,0,0,0.05);
+  border-radius: 8px; padding: 12px 20px; margin: 12px 0; color: #4338CA;
+  display: inline-block; text-align: center; box-shadow: inset 0 2px 4px rgba(0,0,0,0.02);
+}
+
+.stage-box { flex: 1; border: 1px solid; border-radius: 16px; padding: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.02); background: white; margin-bottom: 0px !important; }
+.stage-pretrain { border-color: rgba(59, 130, 246, 0.3); }
+.stage-finetune { border-color: rgba(168, 85, 247, 0.3); }
+.stage-arrow { display: flex; align-items: center; justify-content: center; font-size: 28px; color: #CBD5E1; padding: 0 16px; }
+
+.metric {
+  display: inline-block; background: #ECFDF5; color: #059669; border: 1px solid #A7F3D0;
+  border-radius: 8px; padding: 6px 12px; font-size: 13px; font-family: 'Outfit', sans-serif; font-weight: 700; margin: 4px;
+}
+.metric-warn { background: #FFFBEB; color: #D97706; border-color: #FDE68A; }
+
+.sub-label {
+  font-family: 'Outfit', sans-serif; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px;
+  color: #64748B; margin: 28px 0 16px; display: flex; align-items: center; gap: 12px;
+}
+.sub-label::after { content: ''; flex: 1; height: 1px; background: rgba(0,0,0,0.08); }
+
+/* Phase Header Colors */
+.phase-input > .phase-header { border-left: 4px solid #3B82F6; }
+.phase-data > .phase-header { border-left: 4px solid #10B981; }
+.phase-arch > .phase-header { border-left: 4px solid #8B5CF6; }
+.phase-loss > .phase-header { border-left: 4px solid #EF4444; }
+.phase-train > .phase-header { border-left: 4px solid #F59E0B; }
+.phase-eval > .phase-header { border-left: 4px solid #14B8A6; }
+.phase-calib > .phase-header { border-left: 4px solid #EAB308; }
+.phase-uncert > .phase-header { border-left: 4px solid #64748B; }
+.phase-output > .phase-header { border-left: 4px solid #10B981; border-top: 1px solid rgba(16,185,129,0.2) }
+</style>
+</head>
+<body>
+
+<!-- ──────────────────────────────────────────────────────── -->
+<!-- PAGE HEADER                                              -->
+<!-- ──────────────────────────────────────────────────────── -->
+<div class="page-header">
+  <h1>🫀 SC-Net: Spatio-Temporal Contrast Network — Full Pipeline Flowchart</h1>
+  <p>Automated CAD Diagnosis from Coronary CT Angiography (CCTA) &nbsp;·&nbsp; Based on MICCAI 2024 &nbsp;·&nbsp; github.com/reetmitra/CAD_diagnosis</p>
+</div>
+
+<!-- LEGEND -->
+<div class="legend">
+  <strong>Phases:</strong>
+  <div class="legend-item"><div class="legend-swatch" style="background:#1565C0"></div>Input Data</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#2E7D32"></div>Data Pipeline</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#4A148C"></div>Model Architecture</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#B71C1C"></div>Loss Functions</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#E65100"></div>Training</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#006064"></div>Evaluation</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#F57F17"></div>Calibration</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#37474F"></div>Uncertainty</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#1B5E20"></div>Final Output</div>
+  &nbsp;&nbsp;
+  <strong>Tags:</strong>
+  <div class="legend-item"><span class="tag tag-new">NEW</span>Custom implementation beyond paper</div>
+  <div class="legend-item"><span class="tag tag-key">KEY</span>Critical design decision</div>
+  <div class="legend-item"><span class="tag tag-fixed">BUG FIX</span>Bug that was identified and fixed</div>
+  <div class="legend-item"><span class="tag tag-arch">ARCH</span>Architecture component</div>
+</div>
+
+<!-- ──────────────────────────────────────────────────────── -->
+<!-- MAIN FLOWCHART                                           -->
+<!-- ──────────────────────────────────────────────────────── -->
+<div class="flowchart">
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 1: INPUT DATA                                   -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-input">
+    <div class="phase-header">📥 Phase 1 — Input Data: Coronary CT Angiography (CCTA)</div>
+    <div class="phase-body">
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-blue">
+            <div class="box-title">🫀 CPR Volume (.nii / .nii.gz)</div>
+            <ul class="kl">
+              <li>Curved Planar Reformatted (CPR) vessel cross-section extracted from CCTA scan</li>
+              <li>Target shape: <strong>256 × 64 × 64</strong> (Depth × Height × Width)</li>
+              <li>Raw <strong>Hounsfield Unit (HU)</strong> values stored in NIfTI format</li>
+              <li>Loaded via <code>nibabel</code>; axes transposed to (D, H, W) if originally stored as (H, W, D)</li>
+              <li>Depth axis = proximal → distal along vessel centerline</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-blue" style="margin-bottom:10px">
+            <div class="box-title">🏷️ Stenosis Labels <span class="tag tag-new">NEW FORMAT</span></div>
+            <ul class="kl">
+              <li>File: <code>*_stenosis.txt</code> — 256 integer values (one per depth slice)</li>
+              <li>0 = Background &nbsp;|&nbsp; 1–2 = Non-significant &nbsp;|&nbsp; 3–4 = Significant stenosis</li>
+            </ul>
+          </div>
+          <div class="box box-blue">
+            <div class="box-title">🏷️ Plaque Labels <span class="tag tag-new">NEW FORMAT</span></div>
+            <ul class="kl">
+              <li>File: <code>*_plaque.txt</code> — 256 integer values</li>
+              <li>0 = Background &nbsp;|&nbsp; 1 = Calcified &nbsp;|&nbsp; 2 = Non-calcified &nbsp;|&nbsp; 3 = Mixed</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-orange">
+            <div class="box-title">⚙️ merge_new_labels(stenosis, plaque) <span class="tag tag-new">NEW</span></div>
+            <ul class="kl">
+              <li>Non-significant (1–2) + Plaque → combined label: <strong>1, 2, 3</strong></li>
+              <li>Significant (3–4) + Plaque → combined label: <strong>4, 5, 6</strong></li>
+              <li>Background (0) stays 0</li>
+            </ul>
+            <div class="formula">Non-sig × {Calc, NonCalc, Mixed} → {1, 2, 3}<br>Sig × {Calc, NonCalc, Mixed} → {4, 5, 6}</div>
+            <div class="box-note">Old format fallback: single combined .txt file read directly</div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-note-box">
+            <div class="box-title">📊 Dataset Statistics</div>
+            <ul class="kl">
+              <li><strong>Training pool:</strong> 2,961 files (APNHC patients)</li>
+              <li><strong>Held-out test set:</strong> 665 files (AP-NUH patients — completely separate hospital)</li>
+              <li>Internal split of train pool: 70/15/15 (train/val/test)</li>
+              <li>Per-artery volumes: LAD, LCX, RCA and branches</li>
+              <li><strong>6 combined label classes</strong> for fine-tuning; 3 for pre-training</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 2: PATIENT-LEVEL SPLITTING                      -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-data">
+    <div class="phase-header">🔀 Phase 2 — Patient-Level Data Splitting (splitting.py)</div>
+    <div class="phase-body">
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">📂 _build_file_pairs(volumes_root, labels_root)</div>
+            <ul class="kl">
+              <li>Scans <code>volumes/</code> directory and matches each volume to its labels by <strong>stem name</strong></li>
+              <li>Prefers new format: <code>.nii.gz</code> + separate <code>_stenosis.txt</code> / <code>_plaque.txt</code></li>
+              <li>Falls back to old format: <code>.nii</code> + combined label <code>.txt</code></li>
+              <li>Returns list of <code>(vol_path, sten_path, plaq_path, comb_path)</code> tuples</li>
+              <li>Deduplicates stems — avoids double-counting <code>.nii</code> and <code>.nii.gz</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">👥 patient_level_split() <span class="tag tag-key">Anti-Leakage</span></div>
+            <ul class="kl">
+              <li>Extracts <strong>PatientID</strong> from filename: <code>P001_LAD.nii → P001</code></li>
+              <li>Groups all arteries from the same patient together</li>
+              <li>Shuffles <em>patients</em> (not files) with <strong>seed=42</strong> for reproducibility</li>
+              <li>Split: <strong>70% Train / 15% Validation / 15% Test</strong> at patient level</li>
+              <li>Guarantees: no patient appears in more than one split — <em>prevents data leakage</em></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-note-box">
+            <div class="box-title">⚠️ Critical Design Choices</div>
+            <ul class="kl">
+              <li>File indices (not raw filenames) passed to <code>cubic_sequence_data</code> to maintain alignment with <code>file_pairs</code></li>
+              <li>Early stopping monitored on <strong>validation</strong> set, not test set</li>
+              <li><span class="tag tag-fixed">BUG FIX</span> &nbsp;<em>Trainer previously used test split for validation monitoring (leaked test data into early-stopping decisions) — now correctly uses val indices</em></li>
+              <li>Held-out test set (<code>dataset/test/</code>) never seen during training or calibration</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 3: PREPROCESSING & AUGMENTATION                 -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-data">
+    <div class="phase-header">⚙️ Phase 3 — Preprocessing, Augmentation & DataLoader (augmentation.py + functions.py)</div>
+    <div class="phase-body">
+
+      <div class="sub-label">Data Loading & Preprocessing</div>
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">📦 cubic_sequence_data.__getitem__(index)</div>
+            <ul class="kl">
+              <li>Maps index → actual file pair via patient-split file_indices</li>
+              <li>Loads volume using <code>nibabel.load()</code> → <code>get_fdata()</code></li>
+              <li>Transposes if stored as (H,W,D): checks <code>shape[2] > shape[0]</code></li>
+              <li>Resizes to [256, 64, 64] via <code>scipy.ndimage.zoom(order=3)</code> (cubic spline)</li>
+              <li>Loads labels: merges stenosis + plaque if separate files</li>
+              <li>Resizes labels to depth=256 via <code>zoom(order=0)</code> (nearest-neighbour to preserve integer classes)</li>
+              <li><strong>Label remapping (pre-training):</strong> <code>((lbl−1) % 3) + 1</code> → maps 6-class to 3-class (plaque composition)</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">🪟 HU Windowing — normalize_ct_data()</div>
+            <ul class="kl">
+              <li><strong>Standard (single channel):</strong></li>
+              <li>&nbsp;&nbsp;Center=300 HU, Width=900 HU → range [−150, 750 HU] → normalized to [0, 1]</li>
+              <li>&nbsp;&nbsp;Output: [D, H, W] float tensor</li>
+              <li><strong>Multi-window (3 channels):</strong> <span class="tag tag-new">NEW</span></li>
+              <li>&nbsp;&nbsp;Ch 0 — Soft tissue:&nbsp;&nbsp; HU [−150, &nbsp;750] → [0,1]</li>
+              <li>&nbsp;&nbsp;Ch 1 — Calcium/bone:&nbsp;&nbsp;HU [−450, 1050] → [0,1]</li>
+              <li>&nbsp;&nbsp;Ch 2 — Vascular:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;HU [−250, &nbsp;450] → [0,1]</li>
+              <li>&nbsp;&nbsp;Output: [3, D, H, W] float tensor</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">📍 detection_targets(labels)</div>
+            <ul class="kl">
+              <li>Scans depth axis for <strong>contiguous lesion segments</strong> (tracks label transitions)</li>
+              <li>Each segment → 1D bounding box: <code>[center, width]</code> normalized to [0, 1] along depth</li>
+              <li>Label = segment class − 1 (zero-indexed for CE loss)</li>
+              <li>Output: <code>{"labels": Tensor[N], "boxes": Tensor[N, 2]}</code></li>
+              <li>Healthy/background volume → empty tensors <code>shape (0, 2)</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">🗂️ collate_fn() + DataLoader</div>
+            <ul class="kl">
+              <li>Stacks images into batch: <code>[B, D, H, W]</code> or <code>[B, 3, D, H, W]</code></li>
+              <li>Keeps targets as <strong>list of dicts</strong> (variable number of boxes per sample)</li>
+              <li>batch_size=2, shuffle=True (train), num_workers=4</li>
+              <li><strong>Balanced sampling:</strong> inverse-frequency sample weights per lesion class to counter class imbalance</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="sub-label" style="margin-top:12px">Augmentation Strategies</div>
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-orange">
+            <div class="box-title">🔄 Online Augmentation — online_augment() <span class="tag tag-new">NEW</span></div>
+            <ul class="kl">
+              <li>Applied during training only; random per sample</li>
+              <li><strong>Axial rotation:</strong> ±15° applied identically to all slices (p=0.5) — vessel stays centered</li>
+              <li><strong>Depth flip:</strong> reverse along D-axis, labels flipped in sync (p=0.5)</li>
+              <li><strong>Intensity shift:</strong> global HU offset ±50 (p=0.5) — preserves relative tissue contrast</li>
+              <li>Designed to preserve lesion spatial structure; heavy distortions excluded</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col" style="flex:2">
+          <div class="box box-orange">
+            <div class="box-title">🔬 Offline Augmentation — clinically_credible_augmentation (CDA) <span class="tag tag-key">CDA</span> <span class="tag tag-new">NEW</span></div>
+            <ul class="kl">
+              <li><strong>Purpose:</strong> Synthesize new training samples by splicing lesion segments from one scan into background of another</li>
+              <li><strong>Step 1 — Resize:</strong> both foreground (lesion) and background volumes resized to [256,64,64] via cubic zoom</li>
+              <li><strong>Step 2 — Splice:</strong> background slices (label=0) filled from background scan; foreground slices (label>0) filled from foreground scan</li>
+              <li><strong>Step 3 — Intensity Matching:</strong> normalize foreground intensity to match background distribution (z-score normalization)</li>
+              <li><strong>Step 4 — Soft Blending:</strong> cosine blending at foreground/background boundaries (blend_margin=3 slices) to avoid sharp seams</li>
+              <li>Saved as new NIfTI files for use in training; does not run per-batch</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 4: MODEL ARCHITECTURE                           -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-arch">
+    <div class="phase-header">🧠 Phase 4 — SC-Net Architecture: spatio_temporal_semantic_learning (architecture.py)</div>
+    <div class="phase-body">
+
+      <!-- Input -->
+      <div class="box box-purple" style="text-align:center; font-weight:700; font-size:13px; margin-bottom:14px; padding:10px;">
+        Model Input Tensor: <code>[B, D, H, W] = [B, 256, 64, 64]</code> &nbsp;—&nbsp; or &nbsp;<code>[B, 3, D, H, W]</code> for multi-window mode<br>
+        <span style="font-weight:400; font-size:12px;">Both branches receive the <em>same input</em> simultaneously and run in parallel</span>
+      </div>
+
+      <!-- Dual Branch -->
+      <div class="dual-branch">
+
+        <!-- ─── TEMPORAL BRANCH (LEFT) ─── -->
+        <div class="branch-left">
+          <div class="branch-label-left">
+            🕐 BRANCH 1: Temporal Semantic Learning
+            <span>(sampling_point_framework — temporal_semantic_learning)</span>
+          </div>
+
+          <div class="arch-step arch-step-t">
+            <span class="arch-step-num">① _3d_cubes_selection()</span> &nbsp;— <em>functions.py</em><br>
+            Extracts <strong>32 cubic crops</strong> of size 25³ voxels along the vessel depth axis<br>
+            Centers placed at: <code>step/2 + step×i</code>, with step=8 (evenly spaced proximal→distal)<br>
+            Handles boundary crops with zero-padding<br>
+            Output: <code>[B, 32, 25, 25, 25]</code>
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-t">
+            <span class="arch-step-num">② Conv3d — 4-Level 3D CNN</span><br>
+            Processes <em>all 32 cubes together as a temporal sequence</em><br>
+            4 levels: 1→16→32→64→128 channels<br>
+            Each level: <code>Conv3d(3×3×3)</code> + <code>BatchNorm3d</code> + <code>ReLU</code> + <code>MaxPool3d(2×2×2)</code><br>
+            Output: <code>[B, 32, 128, d', h', w']</code><br>
+            <span class="tag tag-fixed">CRITICAL FIX</span> &nbsp;Previously cubes were processed 1-at-a-time (l=1), disabling the temporal transformer entirely. Now all 32 cubes form a true temporal sequence.
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-t">
+            <span class="arch-step-num">③ temporal_flattening_projection</span><br>
+            <code>Conv3d(1×1×1)</code> → Flatten spatial dims → <code>Linear(flat_dim → 512)</code><br>
+            Projects each of the 32 cube feature maps to 512-dim embedding<br>
+            Output: <code>[B, 32, 512]</code>
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-t">
+            <span class="arch-step-num">④ Learnable Positional Encoding</span> &nbsp;<span class="tag tag-new">NEW</span><br>
+            Parameter shape: <code>[1, 32, 512]</code> — initialized with truncated normal (std=0.02)<br>
+            Encodes proximal→distal vessel ordering for self-attention<br>
+            Added element-wise: <code>x = x + pos_embedding[:, :32, :]</code>
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-t">
+            <span class="arch-step-num">⑤ temporal_correlation_analysis — Transformer Encoder</span><br>
+            <strong>4-layer TransformerEncoderLayer</strong> (nhead=8, dropout=0.1, activation=ReLU, batch_first=True)<br>
+            Full self-attention across all 32 cube positions simultaneously<br>
+            Captures long-range dependencies along vessel (e.g., distal lesion affecting proximal context)<br>
+            Output: <code>[B, 32, 512]</code>
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-t">
+            <span class="arch-step-num">⑥ sampling_point_classify — MLP Head</span><br>
+            <code>Linear(512 → 128) → GELU → Linear(128 → num_classes+1)</code><br>
+            Softmax applied at test time; raw logits used during training for stability<br>
+            Output: <code>[B, 32, num_classes+1]</code> &nbsp;—&nbsp; per-cube class probabilities along vessel
+          </div>
+
+          <div class="box box-blue" style="margin-top:10px; text-align:center; font-size:12px;">
+            <strong>SC Output:</strong> xs = <code>{pred_logits: [B, 32, C+1]}</code><br>
+            32 sampling-point predictions along vessel depth
+          </div>
+        </div>
+
+        <!-- DIVIDER -->
+        <div class="branch-divider"></div>
+
+        <!-- ─── SPATIAL BRANCH (RIGHT) ─── -->
+        <div class="branch-right">
+          <div class="branch-label-right">
+            🗺️ BRANCH 2: Spatial Semantic Learning
+            <span>(object_detection_framework — spatial_semantic_learning)</span>
+          </div>
+
+          <div class="arch-step arch-step-s">
+            <span class="arch-step-num">① feature_extraction_3d — Hybrid 3D + 2D CNN (4 Levels)</span><br>
+            Input: <code>[B, 1, 256, 64, 64]</code> (unsqueezed if single-channel)<br>
+            Feature maps progression: 1 → 16 → 32 → 64 → 128 channels across 4 levels
+          </div>
+          <div style="margin-left:14px; margin-bottom:4px; font-size:12px;">
+            <div class="arch-step arch-step-s" style="margin-bottom:5px;">
+              <strong>_3d_extraction_block</strong> (at each level i):<br>
+              2–3 stacked <code>Conv3d(3×3×3)</code> + <code>BatchNorm3d</code> + <code>ReLU</code> + <code>MaxPool3d</code><br>
+              Captures full volumetric vessel context
+            </div>
+            <div class="arch-step arch-step-s" style="margin-bottom:5px;">
+              <strong>_2d_extraction_block</strong> (at each level i): <span class="tag tag-arch">MULTI-VIEW</span><br>
+              Extracts 4 complementary 2D planar views from the 3D volume:<br>
+              &nbsp;&nbsp;• View 1: Axial slice at mid-height (H/2)<br>
+              &nbsp;&nbsp;• View 2: Sagittal slice at mid-width (W/2)<br>
+              &nbsp;&nbsp;• View 3: Diagonal plane (D × H × W, ↗ direction)<br>
+              &nbsp;&nbsp;• View 4: Anti-diagonal plane (↘ direction)<br>
+              2D Conv layers applied to each view → features projected back to 3D using learned weights <code>[1, 4, 1, 1, 1, 1]</code>
+            </div>
+            <div class="arch-step arch-step-s">
+              <strong>Weighted Fusion (levels 1–3):</strong><br>
+              <div class="formula" style="margin:3px 0">x_3d = α × 3D_features + (1 − α) × 2D_features</div>
+              α = 0.75 (<code>_3d_weight</code>, learnable scalar parameter)<br>
+              Level 0: 3D and 2D applied independently (no fusion)
+            </div>
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-s">
+            <span class="arch-step-num">② spatial_flattening_projection</span><br>
+            <code>Conv3d(1×1×1)</code> to reduce channels (128→16) + Flatten + <code>Linear</code><br>
+            Converts 3D feature map to sequence of spatial tokens<br>
+            Output: <code>[B, 16, 512]</code> (16 spatial feature positions as memory for transformer)
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-s">
+            <span class="arch-step-num">③ nn.Transformer — DETR-Style Encoder-Decoder</span><br>
+            <strong>Encoder:</strong> 4 layers over spatial feature sequence (as memory keys/values)<br>
+            <strong>Decoder:</strong> 4 layers with <strong>Q=16 learnable query embeddings</strong> (<code>nn.Embedding(16, 512)</code>)<br>
+            Each query independently attends to the entire spatial memory<br>
+            Each query slot = one potential lesion object proposal<br>
+            Output: <code>[B, 16, 512]</code> (16 decoded object representations)
+          </div>
+          <div class="step-down">↓</div>
+
+          <div class="arch-step arch-step-s">
+            <span class="arch-step-num">④ bounding_box_prediction — Dual MLP Heads</span><br>
+            <em>class_prediction:</em> &nbsp;<code>MLP(512→256→num_classes+1)</code> → class logits (Softmax at test time)<br>
+            <em>boxes_prediction:</em> <code>MLP(512→256→2)</code> → Sigmoid → <code>[center, width]</code><br>
+            Boxes are <strong>1D intervals along vessel depth axis</strong>, normalized to [0, 1]<br>
+            Output: xc <code>[B, 16, C+1]</code> &nbsp;+&nbsp; xb <code>[B, 16, 2]</code>
+          </div>
+
+          <div class="box box-red" style="margin-top:10px; text-align:center; font-size:12px;">
+            <strong>OD Output:</strong> <code>{pred_logits: xc [B,16,C+1], pred_boxes: xb [B,16,2]}</code><br>
+            16 lesion proposals: each with a class score + 1D bounding box
+          </div>
+        </div>
+
+      </div><!-- end dual-branch -->
+
+      <!-- Combined forward output -->
+      <div class="box box-purple" style="text-align:center; margin-top:16px; font-size:13px; font-weight:600; padding:11px;">
+        Combined Forward Output (ret_map=True):<br>
+        <code style="font-size:12px;">od_output = {"pred_logits": xc, "pred_boxes": xb} &nbsp;&nbsp;&nbsp; sc_output = {"pred_logits": xs}</code>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 5: LOSS FUNCTIONS                               -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-loss">
+    <div class="phase-header">📉 Phase 5 — Loss Functions: spatio_temporal_contrast_loss (optimization.py)</div>
+    <div class="phase-body">
+
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-red">
+            <div class="box-title">⚙️ L_od — Object Detection Loss <span class="tag tag-key">Spatial Branch</span></div>
+            <ul class="kl">
+              <li><strong>Step 1 — Hungarian Matching</strong> (functions.py: HungarianMatcher):</li>
+              <li>&nbsp;&nbsp;Boxes expanded: <code>[cx, w] → [cx, 0.5, w, 1.0]</code> for GIoU computation</li>
+              <li>&nbsp;&nbsp;Cost matrix: cost_class=1, cost_bbox=1, cost_giou=1</li>
+              <li>&nbsp;&nbsp;Solved via <code>scipy.optimize.linear_sum_assignment</code></li>
+              <li><strong>Step 2 — CE Loss</strong> on class predictions:</li>
+              <li>&nbsp;&nbsp;Empty/no-object class weighted by eos_coef=0.15</li>
+              <li><strong>Step 3 — Box Regression Loss:</strong></li>
+            </ul>
+            <div class="formula">L_od = CE + 5 × L1 + 2 × GIoU</div>
+            <div class="box-note">λ_L1=5, λ_GIoU=2 (MICCAI paper Eq. 5)</div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-red">
+            <div class="box-title">⚙️ L_sc — Sampling Point Classification <span class="tag tag-key">Temporal Branch</span></div>
+            <ul class="kl">
+              <li><strong>Weighted Cross-Entropy:</strong> background=0.5×, lesion classes=1.5×</li>
+              <li><strong>boost_nonsig:</strong> Non-significant class weight doubled (2× lesion weight)</li>
+              <li><strong>Focal Loss</strong> (γ=2.0): <span class="tag tag-new">NEW</span></li>
+              <li>&nbsp;&nbsp;Downweights easy/confident predictions, focuses on hard examples</li>
+              <li><strong>Ordinal EMD Loss</strong> (weight=0.5): <span class="tag tag-new">NEW</span></li>
+            </ul>
+            <div class="formula">EMD = ‖CDF(pred) − CDF(target)‖²</div>
+            <ul class="kl">
+              <li>Penalizes Healthy↔Significant errors more than adjacent class errors (ordinal distance)</li>
+              <li><strong>Label smoothing</strong> (ε=0.1): prevents overconfidence on one-hot targets</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-red">
+            <div class="box-title">⚙️ L_dc — Dual-Task Contrastive Loss <span class="tag tag-key">Cross-Branch</span></div>
+            <ul class="kl">
+              <li>Forces <strong>mutual consistency</strong> between the two branches</li>
+              <li><strong>SC→OD:</strong> SC per-point predictions converted to pseudo-boxes for OD supervision</li>
+              <li><strong>OD→SC:</strong> OD proposals converted to per-slice pseudo-labels for SC supervision</li>
+              <li><strong>Confidence gating:</strong> only predictions with <em>p > 0.3</em> used as pseudo-labels</li>
+              <li><strong>Warm-up schedule:</strong> L_dc held at 0 for first 20 epochs, linearly ramped over next 30 epochs</li>
+            </ul>
+            <div class="formula">L_dc = L_od(C(ŷ_sc), ŷ_od) + L_sc(C⁻¹(ŷ_od), ŷ_sc)</div>
+            <div class="box-note">Soft DC enabled: smooth pseudo-label interpolation instead of hard one-hot</div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Total Loss -->
+      <div class="box" style="margin-top:12px; background:#FCE4EC; border:2px solid #E57373; border-radius:8px; text-align:center; padding:12px;">
+        <div class="box-title" style="justify-content:center; font-size:14px; margin-bottom:8px;">📐 Total Combined Loss</div>
+        <div class="formula" style="font-size:15px; padding:8px 24px;">L_total = L_od + L_sc + δ × L_dc</div>
+        <div style="font-size:12.5px; margin-top:6px; color:#555;">δ = 1.0 (dual-task contrastive weight) &nbsp;·&nbsp; Gradients from all three terms flow back through both branches simultaneously</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 6: TRAINING                                     -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-train">
+    <div class="phase-header">🏋️ Phase 6 — Two-Stage Training Pipeline (train.py + framework.py + scheduler_utils.py)</div>
+    <div class="phase-body">
+
+      <!-- Two-stage training -->
+      <div class="sub-label">Two-Stage Training Strategy</div>
+      <div class="row" style="align-items:stretch; margin-bottom:14px;">
+        <div class="stage-box stage-pretrain">
+          <div style="font-weight:700; font-size:13.5px; color:#1565C0; margin-bottom:8px;">Stage 1: PRE-TRAINING (3-class)</div>
+          <ul class="kl">
+            <li><strong>Task:</strong> Plaque composition only — Calcified / Non-calcified / Mixed</li>
+            <li>Labels remapped: <code>((lbl−1) % 3) + 1</code> to collapse 6→3 classes</li>
+            <li>Trains vessel feature representation + basic plaque discrimination from scratch</li>
+            <li>LR: 3×10⁻⁵ &nbsp;|&nbsp; ~50–60 epochs</li>
+            <li>Fresh random initialization of all weights</li>
+            <li>num_classes=3 → heads size differs from fine-tuning</li>
+            <li><strong>Best backbone:</strong> v6, epoch 8 (val loss 3.22) — selected as finest pre-trained base</li>
+          </ul>
+        </div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-box stage-finetune">
+          <div style="font-weight:700; font-size:13.5px; color:#6A1B9A; margin-bottom:8px;">Stage 2: FINE-TUNING (6-class)</div>
+          <ul class="kl">
+            <li><strong>Task:</strong> Full stenosis severity × plaque composition (6 classes)</li>
+            <li>Non-sig × {Calc, NonCalc, Mixed} = classes 1–3</li>
+            <li>Significant × {Calc, NonCalc, Mixed} = classes 4–6</li>
+            <li>Loads pre-trained backbone (shape-compatible layers only via filtered <code>state_dict</code>)</li>
+            <li>Classification heads (3-class → 6-class) <strong>re-initialized from scratch</strong> by design</li>
+            <li>LR: 5×10⁻⁶ (3–5× lower than pre-training) &nbsp;|&nbsp; ~40–50 epochs</li>
+            <li><strong>Best model:</strong> v7-ft epoch 49 — final_model.pth</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Optimizer, Schedule, Infrastructure -->
+      <div class="sub-label">Optimizer, LR Schedule & Training Infrastructure</div>
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-orange">
+            <div class="box-title">⚡ AdamW Optimizer</div>
+            <ul class="kl">
+              <li>weight_decay=1×10⁻⁴ &nbsp;|&nbsp; grad_clip=0.1</li>
+              <li><strong>Layer-wise LR multipliers:</strong> <span class="tag tag-new">NEW</span></li>
+              <li>&nbsp;&nbsp;Backbone (3D/2D conv): <strong>0.1×</strong> base LR</li>
+              <li>&nbsp;&nbsp;Transformer layers: <strong>0.5×</strong> base LR</li>
+              <li>&nbsp;&nbsp;Classification heads: <strong>1.0×</strong> base LR (full LR)</li>
+              <li><span class="tag tag-fixed">BUG FIX</span> Temporal transformer was getting backbone LR (0.1×) due to wrong parameter name match — now correctly gets 0.5×</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-orange">
+            <div class="box-title">📈 Learning Rate Schedule</div>
+            <ul class="kl">
+              <li><strong>Option A — LinearWarmupCosineDecay:</strong></li>
+              <li>&nbsp;&nbsp;Linear warmup for 10 epochs → cosine annealing to min_lr</li>
+              <li><strong>Option B — CosineAnnealingWarmRestarts:</strong> <span class="tag tag-new">NEW</span></li>
+              <li>&nbsp;&nbsp;T₀=60 epochs, T_mult=2 (each cycle doubles in length)</li>
+              <li>&nbsp;&nbsp;Restarts re-raise LR to escape local minima</li>
+              <li>&nbsp;&nbsp;Effective cycles: 60 → 120 → 240 epochs</li>
+              <li>Both include linear warmup phase</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-orange">
+            <div class="box-title">🔧 Weight Averaging Techniques</div>
+            <ul class="kl">
+              <li><strong>EMA — Exponential Moving Average:</strong></li>
+              <li>&nbsp;&nbsp;decay=0.999 &nbsp;|&nbsp; Shadow weights updated each step</li>
+              <li>&nbsp;&nbsp;Smoother loss landscape; applied at eval/checkpoint save time</li>
+              <li><strong>SWA — Stochastic Weight Averaging:</strong> <span class="tag tag-new">NEW</span></li>
+              <li>&nbsp;&nbsp;Averages model weights starting from epoch 120</li>
+              <li>&nbsp;&nbsp;Uses SWALR scheduler; BN statistics updated at end</li>
+              <li>&nbsp;&nbsp;Finds flatter minima → better generalization</li>
+              <li>&nbsp;&nbsp;Saves <code>swa_model.pth</code> alongside final checkpoint</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-orange">
+            <div class="box-title">🏗️ Training Infrastructure</div>
+            <ul class="kl">
+              <li><strong>AMP:</strong> Mixed-precision (fp16/fp32) with GradScaler</li>
+              <li><strong>DDP:</strong> DistributedDataParallel — 2× NVIDIA RTX 3090 (24 GB each)</li>
+              <li>&nbsp;&nbsp;Launched with <code>torchrun --nproc_per_node=2</code></li>
+              <li>&nbsp;&nbsp;Val loss all-reduced across ranks before early-stopping check</li>
+              <li><span class="tag tag-fixed">BUG FIX</span> NCCL DDP timeout: ranks diverged on patience counter due to local val loss — fixed with <code>dist.all_reduce</code></li>
+              <li><strong>Gradient accumulation:</strong> accumulate_steps=4 (effective batch=8)</li>
+              <li><strong>Early stopping:</strong> patience=60, min_delta=0.001</li>
+              <li><strong>TensorBoard logging</strong> every 10 epochs</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 7: EVALUATION                                   -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-eval">
+    <div class="phase-header">📊 Phase 7 — Evaluation Pipeline (eval.py)</div>
+    <div class="phase-body">
+
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-teal">
+            <div class="box-title">🔄 Prediction Aggregation</div>
+            <ul class="kl">
+              <li><strong>od_predictions_to_artery_level():</strong></li>
+              <li>Aggregates 16 OD query proposals per volume → one artery-level prediction</li>
+              <li>Takes the highest-confidence non-background class across all 16 proposals</li>
+              <li>Maps 6-class → Stenosis (3-class) + Plaque (3-class):</li>
+              <li>&nbsp;&nbsp;Classes 1–3 = Non-significant &nbsp;|&nbsp; Classes 4–6 = Significant</li>
+              <li>&nbsp;&nbsp;Class modulo-3 → Calcified / Non-calcified / Mixed</li>
+              <li><strong>targets_to_artery_level():</strong> identical mapping for ground truth</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-teal">
+            <div class="box-title">🔁 Test-Time Augmentation (TTA) <span class="tag tag-new">NEW</span></div>
+            <ul class="kl">
+              <li>tta_k=5 stochastic augmented versions per test sample</li>
+              <li>Apply <code>online_augment()</code> independently K times</li>
+              <li>Run model forward pass for each augmented version</li>
+              <li>Average raw logits across all K passes before argmax</li>
+              <li>Reduces variance from augmentation randomness at test time</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-teal">
+            <div class="box-title">🗳️ Ensemble Inference <span class="tag tag-new">NEW</span></div>
+            <ul class="kl">
+              <li>Load N checkpoint files (e.g., epoch snapshots or separately trained runs)</li>
+              <li>Run full inference with each model independently on the same test set</li>
+              <li>Average softmax probabilities across all N models</li>
+              <li>Reduces model-specific overfitting; compatible with TTA</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-teal">
+            <div class="box-title">📐 Metrics Computed</div>
+            <ul class="kl">
+              <li>Overall Accuracy (ACC) — artery level</li>
+              <li>Macro-averaged Precision, Recall, F1</li>
+              <li>Per-class: Precision, Recall, F1, Support, Specificity</li>
+              <li>AUC-ROC (one-vs-rest, macro-averaged)</li>
+              <li>Confusion matrix (absolute counts)</li>
+            </ul>
+            <div style="margin-top:7px;">
+              <span class="metric">Stenosis (3-class)</span>
+              <span class="metric">Plaque (3-class)</span>
+              <span class="metric">SC Points (acc)</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Best results box -->
+      <div class="box box-note-box" style="margin-top:12px;">
+        <div class="box-title">🏆 Best Results — v7-ft epoch 49, Held-Out Test Set (665 samples, AP-NUH patients, unseen hospital)</div>
+        <div class="row" style="margin-top:6px;">
+          <div class="col">
+            <strong style="font-size:12px;">Standard Calibration:</strong>
+            <ul class="kl">
+              <li>Stenosis: ACC=0.596, Macro-F1=0.466, AUC=0.713</li>
+              <li>Significant recall=93.5% — but zero Non-significant predictions</li>
+              <li>Plaque: ACC=0.567, F1=0.463, AUC=0.700 <em>(breakthrough vs. earlier runs)</em></li>
+            </ul>
+          </div>
+          <div class="col">
+            <strong style="font-size:12px;">Constrained Calibration (BEST):</strong>
+            <ul class="kl">
+              <li>Stenosis: ACC=0.580, <strong>Macro-F1=0.585</strong>, AUC=0.713</li>
+              <li>Healthy F1=0.586 &nbsp;|&nbsp; Non-sig F1=0.482 &nbsp;|&nbsp; Sig F1=0.688</li>
+              <li>Plaque: ACC=0.567, F1=0.463, AUC=0.700 (unchanged)</li>
+              <li>SC Points ACC=0.814</li>
+            </ul>
+          </div>
+          <div class="col">
+            <strong style="font-size:12px;">Paper Target (MICCAI 2024):</strong>
+            <ul class="kl">
+              <li>Stenosis ACC = 91.4%</li>
+              <li><em>Gap reflects dataset and hardware differences; ongoing improvement with v9-ft</em></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 8: CALIBRATION                                  -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-calib">
+    <div class="phase-header">⚖️ Phase 8 — Per-Class Threshold Calibration (calibrate.py) <span class="tag tag-new" style="background:white;color:#E65100">NEW</span></div>
+    <div class="phase-body">
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-yellow">
+            <div class="box-title">① Collect Validation Probabilities</div>
+            <ul class="kl">
+              <li>Run full inference on the <strong>validation split</strong> (never the test set)</li>
+              <li>Collect 3-class stenosis softmax probabilities per artery</li>
+              <li>Store: <code>probs_array [N_arteries, 3]</code> and ground-truth labels</li>
+              <li>Supports both single-model and ensemble inputs</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-yellow">
+            <div class="box-title">② Threshold Decision Rule</div>
+            <div class="formula">pred = argmax(pᵢ / tᵢ) &nbsp; for i ∈ {Healthy, NonSig, Sig}</div>
+            <ul class="kl">
+              <li>Default argmax = uniform thresholds t=[1,1,1]</li>
+              <li>Lower t_sig → model more willing to predict Significant</li>
+              <li>Higher t_healthy → model less willing to predict Healthy</li>
+              <li>Lower t_nonsig → recovers Non-significant class recall</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-yellow">
+            <div class="box-title">③ Grid Search Strategies</div>
+            <ul class="kl">
+              <li><strong>Standard 2D search:</strong> t_nonsig=1.0 fixed; search t_healthy × t_sig (50×50 grid)</li>
+              <li><strong>Constrained 3D search:</strong> <span class="tag tag-key">KEY RESULT</span></li>
+              <li>&nbsp;&nbsp;Search all three thresholds simultaneously (50³ grid)</li>
+              <li>&nbsp;&nbsp;Constraint: Non-sig recall ≥ 10%</li>
+              <li>&nbsp;&nbsp;Objective: maximize macro-F1</li>
+              <li>Result: Non-sig recall 0% → 58% &nbsp;|&nbsp; F1: 0.466 → 0.585 (+25.5%)</li>
+              <li>Key insight: 2D search misses Non-sig sweet spot (t_nonsig=0.35)</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-yellow">
+            <div class="box-title">④ Save &amp; Apply Thresholds</div>
+            <ul class="kl">
+              <li>Saves to <code>calibration_thresholds.json</code> with keys:</li>
+              <li>&nbsp;&nbsp;<code>stenosis_thresholds</code>: standard 2D result</li>
+              <li>&nbsp;&nbsp;<code>constrained_stenosis_thresholds</code>: 3D constrained result</li>
+              <li>&nbsp;&nbsp;<code>plaque_thresholds</code>: separate plaque calibration</li>
+              <li>Applied at test time via: <code>eval.py --thresholds FILE --use_constrained</code></li>
+              <li>Best: <code>calibration_thresholds_v7_constrained.json</code></li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 9: UNCERTAINTY                                  -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-uncert">
+    <div class="phase-header">🎲 Phase 9 — Uncertainty Estimation: Monte Carlo Dropout (uncertainty.py) <span class="tag tag-new" style="background:white;color:#37474F">NEW</span></div>
+    <div class="phase-body">
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-gray">
+            <div class="box-title">① enable_dropout(model)</div>
+            <ul class="kl">
+              <li>Sets all Dropout layers to <strong>train mode</strong> while keeping all other layers in eval mode</li>
+              <li>Enables stochastic forward passes at test time (non-deterministic Dropout)</li>
+              <li>No gradient computation (wrapped in <code>@torch.no_grad()</code>)</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-gray">
+            <div class="box-title">② N=10 MC Forward Passes</div>
+            <ul class="kl">
+              <li>Same input volume processed N=10 times with different Dropout masks</li>
+              <li>Each pass: extract OD logits <code>[1, 16, C+1]</code> → Softmax → max probability across 16 proposals</li>
+              <li>Stack all passes: <code>mc_probs [10, C+1]</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-gray">
+            <div class="box-title">③ Uncertainty Quantification</div>
+            <ul class="kl">
+              <li><strong>Mean probabilities:</strong> <code>mean_probs = mc_probs.mean(axis=0)</code></li>
+              <li><strong>Variance:</strong> <code>variance = mc_probs.var(axis=0)</code> — per-class spread</li>
+              <li><strong>Predictive entropy:</strong></li>
+            </ul>
+            <div class="formula">H = −Σ p̄ · log(p̄ + ε)</div>
+            <ul class="kl">
+              <li>High entropy → high uncertainty → flag case for radiologist review</li>
+              <li>Results saved to <code>uncertainty_results.json</code> keyed by artery ID</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- PHASE 10: FINAL OUTPUT                                -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div class="phase phase-output">
+    <div class="phase-header">🎯 Phase 10 — Final Clinical Output</div>
+    <div class="phase-body">
+      <div class="row">
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">🫀 Stenosis Classification (per artery)</div>
+            <ul class="kl">
+              <li>🟢 <strong>Healthy</strong> — No significant stenosis detected</li>
+              <li>🟡 <strong>Non-significant</strong> — &lt;50% lumen narrowing</li>
+              <li>🔴 <strong>Significant</strong> — ≥50% lumen narrowing (clinically actionable)</li>
+            </ul>
+            <div class="box-note">Calibrated probability per class &nbsp;|&nbsp; Threshold-adjusted prediction</div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">🧫 Plaque Composition (per artery)</div>
+            <ul class="kl">
+              <li>⚪ <strong>Calcified</strong> — Dense, stable plaque</li>
+              <li>🟤 <strong>Non-calcified</strong> — Soft plaque (higher vulnerability / rupture risk)</li>
+              <li>🟠 <strong>Mixed</strong> — Combination of calcified + non-calcified components</li>
+            </ul>
+            <div class="box-note">Jointly predicted with stenosis from the same dual-branch model</div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">📍 Lesion Localization</div>
+            <ul class="kl">
+              <li>OD branch outputs 1D bounding boxes <code>[center, width]</code> normalized to [0, 1] along vessel depth axis</li>
+              <li>Maps to specific segment position along the coronary artery CPR</li>
+              <li>Up to 16 lesion proposals per volume</li>
+              <li>Temporal branch provides independent per-slice class labels at 32 positions</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="box box-green">
+            <div class="box-title">🎲 Confidence &amp; Uncertainty</div>
+            <ul class="kl">
+              <li>Calibrated class probabilities (scaled by thresholds)</li>
+              <li>MC Dropout predictive entropy per case</li>
+              <li>High-entropy cases automatically flagged for expert radiologist review</li>
+              <li>Variance across MC passes available per class</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Summary performance metrics -->
+      <div class="box box-note-box" style="margin-top:12px;">
+        <div class="box-title">📈 Current Best Performance Summary — v7-ft with Constrained Calibration (665 held-out test samples, AP-NUH hospital)</div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; align-items:center;">
+          <span class="metric">Stenosis ACC: 58.0%</span>
+          <span class="metric">Stenosis Macro-F1: 58.5%</span>
+          <span class="metric">Stenosis AUC: 71.3%</span>
+          <span class="metric">Plaque ACC: 56.7%</span>
+          <span class="metric">Plaque Macro-F1: 46.3%</span>
+          <span class="metric">Plaque AUC: 70.0%</span>
+          <span class="metric">SC Points ACC: 81.4%</span>
+          <span style="font-style:italic; font-size:12px; color:#555; margin-left:6px;">Paper MICCAI 2024 target: Stenosis ACC 91.4%</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- FOOTER                                                -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div style="margin-top:28px; padding:16px 22px; background:white; border-radius:8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); font-size:12px; color:#546E7A; line-height:1.8; border-left: 5px solid #3F51B5;">
+    <strong style="color:#1A237E; font-size:13px;">Key Custom Implementations Beyond the Original SC-Net Paper:</strong><br>
+    <span style="color:#2E7D32;">✔</span> Patient-level anti-leakage data splitting (splitting.py) &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Critical temporal branch architecture fix (true sequence attention across all 32 cubes) &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Clinically Credible Augmentation (foreground splice + intensity matching + cosine blending) &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Multi-window HU preprocessing (3-channel CT input for richer tissue contrast) &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Ordinal EMD loss for stenosis severity ordering &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> 3D constrained threshold calibration (Non-sig recall: 0%→58%) &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Monte Carlo Dropout uncertainty estimation &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Cosine warm restarts LR schedule &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Stochastic Weight Averaging (SWA) &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Layer-wise adaptive learning rates &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> EMA weight smoothing &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> AMP + DDP multi-GPU training (2× RTX 3090) &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Focal loss + boost_nonsig class weighting &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Confidence-gated dual-task contrastive loss with linear warm-up &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Ensemble + TTA evaluation framework &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Label smoothing &nbsp;·&nbsp;
+    <span style="color:#2E7D32;">✔</span> Gradient accumulation for larger effective batch size
+    <br><br>
+    <strong style="color:#1A237E;">Reference:</strong> Ma et al., "Spatio-Temporal Contrast Network for Data-Efficient Learning of Coronary Artery Disease in Coronary CT Angiography," MICCAI 2024, pp. 645–655.
+    &nbsp;&nbsp;|&nbsp;&nbsp;
+    <strong style="color:#1A237E;">Implementation Repository:</strong> github.com/reetmitra/CAD_diagnosis
+    &nbsp;&nbsp;|&nbsp;&nbsp;
+    <strong style="color:#1A237E;">Generated:</strong> April 1, 2026
+  </div>
+
+</div><!-- end .flowchart -->
+
+</body>
+</html>
