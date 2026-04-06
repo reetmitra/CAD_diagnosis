@@ -292,6 +292,7 @@ class Trainer:
         # ---- bookkeeping ----
         self.start_epoch = 0
         self.best_val_loss = float('inf')
+        self.best_stenosis_f1 = 0.0   # used as primary checkpoint metric
         self.global_step = 0
         self.patience_counter = 0
 
@@ -860,10 +861,20 @@ class Trainer:
                                            stenosis_metrics['acc'], epoch)
                     self.writer.add_scalar('Metrics/stenosis_f1',
                                            stenosis_metrics['f1'], epoch)
+                    self.writer.add_scalar('Metrics/stenosis_prec',
+                                           stenosis_metrics['prec'], epoch)
+                    self.writer.add_scalar('Metrics/stenosis_recall',
+                                           stenosis_metrics['recall'], epoch)
                     self.writer.add_scalar('Metrics/plaque_acc',
                                            plaque_metrics['acc'], epoch)
                     self.writer.add_scalar('Metrics/plaque_f1',
                                            plaque_metrics['f1'], epoch)
+                    self.writer.add_scalar('Metrics/plaque_prec',
+                                           plaque_metrics['prec'], epoch)
+                    self.writer.add_scalar('Metrics/plaque_recall',
+                                           plaque_metrics['recall'], epoch)
+                    self.writer.add_scalar('Metrics/best_stenosis_f1',
+                                           self.best_stenosis_f1, epoch)
 
                     self.writer.add_scalar('LR/learning_rate',
                                            current_lr, epoch)
@@ -880,13 +891,18 @@ class Trainer:
 
                     self.writer.flush()
 
-                # Save best model
-                if val_loss < self.best_val_loss - self.args.min_delta:
+                # Save best model — use stenosis F1 as primary metric.
+                # Val loss is unsuitable: it includes the DC term which grows
+                # monotonically as dc_weight ramps 0→1, so best_model would be
+                # frozen at the last pre-DC epoch regardless of classification quality.
+                current_f1 = stenosis_metrics['f1']
+                if current_f1 > self.best_stenosis_f1 + self.args.min_delta:
                     self.save_checkpoint(
                         epoch, val_loss,
                         os.path.join(self.args.checkpoint_dir, 'best_model.pth'),
                     )
-                    print(f"  -> New best model saved (val_loss={val_loss:.4f})")
+                    print(f"  -> New best model saved "
+                          f"(stenosis_f1={current_f1:.4f}, val_loss={val_loss:.4f})")
                 elif self.args.patience > 0:
                     print(f"  -> No improvement ({self.patience_counter + 1}/{self.args.patience})")
 
@@ -895,8 +911,10 @@ class Trainer:
                     self.save_checkpoint(epoch, val_loss)
 
             # Early stopping tracking (all ranks, so DDP stays in sync)
-            if val_loss < self.best_val_loss - self.args.min_delta:
-                self.best_val_loss = val_loss
+            current_f1 = stenosis_metrics['f1']
+            if current_f1 > self.best_stenosis_f1 + self.args.min_delta:
+                self.best_val_loss = val_loss        # keep for logging continuity
+                self.best_stenosis_f1 = current_f1
                 self.patience_counter = 0
             else:
                 self.patience_counter += 1

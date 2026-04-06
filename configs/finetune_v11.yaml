@@ -1,0 +1,95 @@
+# SC-Net v11 fine-tuning — from v10 pre-trained checkpoint (200 epochs)
+#
+# Key changes from v10:
+#
+#   Checkpoint selection:
+#     - best_model.pth now saved on stenosis F1 (not val loss)
+#     - val loss is a bad proxy once DC weight ramps; F1 is DC-immune
+#
+#   DC schedule (less aggressive):
+#     - hold 5 epochs (was 20): earlier mutual supervision, avoids task
+#       branches converging to independent local minima before DC activates
+#     - ramp 40 epochs (was 30): gentler slope reduces abrupt loss landscape shift
+#     - delta 0.5 (was 1.0): DC contributes at most 50% of task loss magnitude
+#     - confidence_threshold 0.4 (was 0.3): higher quality pseudo-labels only
+#
+#   LR schedule (aligned with DC):
+#     - T0=30 (was 60): first cosine cycle ends at ep35, before DC plateau at ep45
+#       so restart fires while DC is still ramping — LR and loss co-evolve
+#     - warmup 5 epochs (was 10): pretrained start needs shorter warmup
+#
+#   SWA starts earlier (epoch 80 vs 120) to capture more of the learning curve
+#
+# Usage (2x GPU):
+#   torchrun --nproc_per_node=2 --master_port=29502 train.py --distributed \
+#     --config configs/finetune_v11.yaml \
+#     --pretrained ./checkpoints_v10/best_model.pth
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 250
+lr: 3.0e-5
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 5
+
+# LR schedule: cosine warm restarts — shorter T0 aligns with DC ramp
+lr_schedule: cosine_warm_restarts
+lr_t0: 30
+lr_t_mult: 2
+
+# SWA: start earlier to capture more of the fine-tuning curve
+swa: true
+swa_start_epoch: 80
+
+# DC: gentler schedule, lower weight, higher confidence threshold
+dc_warmup_hold: 5
+dc_warmup_ramp: 40
+delta: 0.5
+dc_confidence_threshold: 0.4
+soft_dc: true
+label_smoothing: 0.1
+
+# Ordinal loss
+ordinal_weight: 0.5
+
+# Early stopping — patience relative to stenosis F1 (not val loss)
+patience: 60
+min_delta: 0.001
+
+# Class imbalance handling
+balanced_sampling: true
+sc_class_weight: true
+boost_nonsig: true
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.15
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+
+# Training infrastructure
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 8
+seed: 42
+patient_split: true
+split_seed: 42
+
+# Transformer architecture (must match v10 pre-training)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging
+checkpoint_dir: ./checkpoints_v11_finetune
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10
