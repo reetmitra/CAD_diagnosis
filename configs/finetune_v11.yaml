@@ -44,8 +44,10 @@ lr_t_mult: 2
 swa: true
 swa_start_epoch: 80
 
-# DC: gentler schedule, lower weight, higher confidence threshold
-dc_warmup_hold: 5
+# DC: hold=20 proven stable (v7, v10-1D both stable with this);
+# ramp=40 gentler than v10's 30; delta=0.5 prevents DC overwhelming task signal;
+# confidence_threshold=0.4 higher quality pseudo-labels
+dc_warmup_hold: 20
 dc_warmup_ramp: 40
 delta: 0.5
 dc_confidence_threshold: 0.4
