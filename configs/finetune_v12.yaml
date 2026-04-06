@@ -1,0 +1,97 @@
+# SC-Net v12 fine-tuning — from v10 pre-trained checkpoint (200 epochs)
+#
+# Key changes from v11:
+#
+#   LR schedule (root cause fix for v11 early stopping at ep1):
+#     - T0=60 (was 30): matches v10-1D which peaked at F1=0.468
+#       v11's T0=30 caused LR to hit near-zero at ep18-23, exactly when DC
+#       activated at ep20 — DC fired with zero gradient signal, model never
+#       recovered past the ep1 spike in time before patience=60 fired
+#     - warmup_epochs=10 (was 5): matches v10-1D, gives heads more time to
+#       settle before cosine decay begins
+#
+#   Patience (root cause fix for v11 early stopping at ep1):
+#     - patience=100 (was 60): pretrained backbone produces an early F1 spike
+#       at ep1 before heads are trained; need enough runway for the model to
+#       surpass it after LR recovery (~70-80 epochs post-spike)
+#
+#   All other v11 improvements retained:
+#     - Checkpoint metric: stenosis F1 (not val loss)
+#     - DC: hold=20, ramp=40, delta=0.5, confidence_threshold=0.4
+#     - SWA: starts epoch 80
+#     - 1D IoU: active
+#
+# Usage (2x GPU):
+#   torchrun --nproc_per_node=2 --master_port=29503 train.py --distributed \
+#     --config configs/finetune_v12.yaml \
+#     --pretrained ./checkpoints_v10/best_model.pth
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 250
+lr: 3.0e-5
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+# LR schedule: T0=60 matches v10-1D; prevents LR hitting zero at DC activation
+lr_schedule: cosine_warm_restarts
+lr_t0: 60
+lr_t_mult: 2
+
+# SWA: start at epoch 80 to capture second cosine cycle weights
+swa: true
+swa_start_epoch: 80
+
+# DC: hold=20 proven stable; ramp=40 gentler slope; delta=0.5 prevents DC
+# overwhelming task signal; confidence_threshold=0.4 higher quality pseudo-labels
+dc_warmup_hold: 20
+dc_warmup_ramp: 40
+delta: 0.5
+dc_confidence_threshold: 0.4
+soft_dc: true
+label_smoothing: 0.1
+
+# Ordinal loss
+ordinal_weight: 0.5
+
+# Early stopping — patience=100 accounts for ep1 pretrained spike
+patience: 100
+min_delta: 0.001
+
+# Class imbalance handling
+balanced_sampling: true
+sc_class_weight: true
+boost_nonsig: true
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.15
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+
+# Training infrastructure
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 8
+seed: 42
+patient_split: true
+split_seed: 42
+
+# Transformer architecture (must match v10 pre-training)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging
+checkpoint_dir: ./checkpoints_v12_finetune
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10
