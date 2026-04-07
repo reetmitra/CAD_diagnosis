@@ -2112,3 +2112,103 @@ Previously coloured by detection outcome (green/orange/red/purple). Now coloured
 **Removed Dead Code:**
 Removed `_draw_label_bar`, `_draw_semantic_bar`, `_extract_per_slice_predictions` inner helpers and `RAW_LABEL_COLOURS`, `STEN_BAR_COLOURS`, `PLAQ_BAR_COLOURS` constants — replaced by `RAW_BAR_COLOURS` and `PAPER_LEGEND`.
 
+---
+
+## Phase 15: Native 1D Interval IoU (2026-04-06)
+
+**Files:** `functions.py`, `optimization.py` | **Commit:** `4c0058d`
+
+### 15.1 Problem
+
+The spatial branch predicts 1D lesion intervals along the vessel axis as `[cx, w]` (centre, width). The Hungarian matcher and GIoU loss previously used a fake 2D expansion trick: appending `cy=0.5, h=1.0` to produce `[cx, 0.5, w, 1.0]` so the existing 2D IoU machinery could be reused. This:
+
+- Added spurious spatial dimensions with no physical meaning
+- Made the GIoU gradient depend on fake height terms
+- Caused instability in DC loss (DC weight spiked erratically in v10)
+
+### 15.2 Fix
+
+Three new functions added to `functions.py`:
+
+- `box_cxw_to_se(x)` — converts `[cx, w]` → `[start, end]` interval representation
+- `box_1d_iou(boxes1, boxes2)` — pairwise 1D IoU between interval sets
+- `generalized_box_1d_iou(boxes1, boxes2)` — 1D GIoU including the hull penalty term
+
+Four sites updated in `optimization.py`:
+
+- `HungarianMatcher` cost matrix: uses `box_cxw_to_se` + `generalized_box_1d_iou`
+- `object_detection_loss.loss_boxes`: L1 loss on `[start, end]` pairs; GIoU on 1D intervals
+- `_get_sampling_point_classification_targets`: removed fake expansion
+- `_compute_soft_sc_loss`: removed fake expansion
+
+The `boxes_dimension_expansion` function is no longer called anywhere.
+
+---
+
+## Phase 16: Checkpoint Selection Fix + v11/v12 Fine-tuning (2026-04-06)
+
+**Files:** `train.py`, `configs/finetune_v11.yaml`, `configs/finetune_v12.yaml` | **Commits:** `c926912`, `467099a`, `cb8dfc2`
+
+### 16.1 Problem: Val Loss as Checkpoint Metric
+
+Val loss = OD loss + SC loss + DC loss × dc_weight. During the DC ramp (epochs hold → hold+ramp), dc_weight grows linearly from 0 to delta. This means val loss grows monotonically during the ramp regardless of model quality — the DC contribution inflates the loss even when predictions are improving.
+
+In v10 fine-tuning this caused `best_model.pth` to be saved at epoch 19 (last pre-DC epoch) and never updated again, even though stenosis F1 continued climbing to 0.468 at epoch 61.
+
+### 16.2 Fix
+
+`train.py` checkpoint selection changed from `val_loss < best_val_loss` to `stenosis_f1 > best_stenosis_f1 + min_delta`. Early stopping patience counter also tracks F1, not loss. Additional TensorBoard scalars: `stenosis_prec`, `stenosis_recall`, `plaque_prec`, `plaque_recall`, `best_stenosis_f1`.
+
+### 16.3 v11 Fine-tuning (Failed)
+
+Config: `dc_warmup_hold=5` (too aggressive), `lr_t0=30`.
+
+- `dc_warmup_hold=5`: DC activated at epoch 5 while the 6-class heads (reinitialised from 3-class pre-training) were still unstabilised. Mutual supervision amplified noise rather than signal.
+
+- `lr_t0=30`: LR reached near-zero at epochs 18–23, exactly when DC activated at epoch 20. DC fired with effectively zero gradient signal.
+
+- Best F1=0.379 achieved at epoch 1 (pretrained backbone, barely-trained heads). Early stopping fired at epoch 61 having never surpassed this. Test set F1=0.170 — degenerate.
+
+### 16.4 v12 Fine-tuning (Best Overall)
+
+Config: `dc_warmup_hold=20`, `lr_t0=60`, `patience=100`. All other v11 improvements retained (delta=0.5, ramp=40, confidence_threshold=0.4, SWA@80, 1D IoU, F1 checkpoint).
+
+Training trajectory (250 epochs, 2×RTX 3090):
+
+- Epochs 0–20 (DC hold): F1 climbed 0.331 → 0.426, LR maintained at ~2–3e-5
+- Epochs 21–60 (DC ramp): LR cycled to near-zero at ep37–48; F1 dipped to ~0.380
+- Epochs 61–250 (DC plateau, dc_w=0.5): LR restarted; F1 climbed steadily 0.400 → **0.584**
+- SWA active from epoch 80; final best checkpoint at late training
+
+**Results (test set, constrained calibration — thresholds: H=2.80, NS=0.65, Sig=0.20):**
+
+| Task | Class | Metric | Value |
+| --- | --- | --- | --- |
+| Stenosis | All | ACC | 0.736 |
+| Stenosis | All | F1 | 0.739 |
+| Stenosis | All | Precision | 0.743 |
+| Stenosis | All | Recall | 0.736 |
+| Stenosis | All | Specificity | 0.867 |
+| Stenosis | Healthy | F1 | 0.868 |
+| Stenosis | Non-significant | F1 | 0.613 |
+| Stenosis | Non-significant | Recall | 0.639 |
+| Stenosis | Significant | F1 | 0.735 |
+| Stenosis | Significant | Recall | 0.733 |
+| Plaque | All | F1 (calibrated) | 0.502 |
+| Plaque | Calcified | F1 | 0.790 |
+| Plaque | Non-calcified | F1 | 0.500 |
+| Plaque | Mixed | F1 | 0.214 |
+
+**v12 vs v7-ft (previous best):**
+
+| Metric | v7-ft | v12-ft | Δ |
+| --- | --- | --- | --- |
+| Stenosis ACC | 0.580 | **0.736** | +0.156 |
+| Stenosis F1 | 0.585 | **0.739** | +0.154 |
+| Non-sig Recall | 0.581 | **0.639** | +0.058 |
+| Sig Recall | 0.595 | **0.733** | +0.138 |
+| Plaque F1 | 0.463 | **0.502** | +0.039 |
+
+Checkpoint: `checkpoints_v12_finetune/best_model.pth`
+Calibration: `calibration_thresholds_v12_constrained.json`
+
