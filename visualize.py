@@ -71,18 +71,45 @@ PLAQUE_NAMES   = ['Calcified', 'Non-calcified', 'Mixed']
 #     non-calcified (2,5)    → pink
 #     mixed (3,6)            → purple
 
-# Single combined-bar colour map: raw label 0-6 → paper colour
-# Each raw label encodes both stenosis severity and plaque type.
-# We match the paper bar exactly: one colour per raw label.
-RAW_BAR_COLOURS = {
-    0: '#4CAF50',   # green       — No-lesion
-    1: '#FFD700',   # yellow      — Non-sig + Calcified
-    2: '#FF80AB',   # pink        — Non-sig + Non-calcified
-    3: '#9C27B0',   # purple      — Non-sig + Mixed
-    4: '#FF6600',   # orange      — Significant + Calcified
-    5: '#FF6680',   # orange-pink — Significant + Non-calcified
-    6: '#CC3300',   # dark-red    — Significant + Mixed
+# Dual-bar colour maps — matching Figure 3 legend exactly
+# Top bar: stenosis severity
+STEN_BAR_COLOURS = {
+    0: '#4CAF50',   # green  — No-lesion
+    1: '#FFC107',   # yellow — Non-significant stenosis
+    2: '#FF6600',   # orange — Significant stenosis
 }
+# Bottom bar: plaque composition
+PLAQUE_BAR_COLOURS = {
+    0: '#4CAF50',   # green  — No-lesion
+    1: '#2196F3',   # blue   — Calcified plaque   (raw labels 3, 6)
+    2: '#FF80AB',   # pink   — Non-calcified plaque (raw labels 1, 4)
+    3: '#9C27B0',   # purple — Mixed plaque         (raw labels 2, 5)
+}
+
+# Keep for cross-section border colouring (raw label → dominant colour)
+RAW_BAR_COLOURS = {
+    0: '#4CAF50',
+    1: '#FF80AB', 2: '#9C27B0', 3: '#2196F3',
+    4: '#FF80AB', 5: '#9C27B0', 6: '#2196F3',
+}
+
+
+def _raw_to_sten_class(lbl):
+    """Raw label (0-6) → stenosis class index for STEN_BAR_COLOURS."""
+    if lbl == 0:
+        return 0
+    return 1 if lbl <= 3 else 2
+
+
+def _raw_to_plaque_class(lbl):
+    """Raw label (0-6) → plaque class index for PLAQUE_BAR_COLOURS."""
+    if lbl == 0:
+        return 0
+    if lbl in (1, 4):
+        return 2   # Non-calcified → pink
+    if lbl in (2, 5):
+        return 3   # Mixed → purple
+    return 1       # Calcified (3, 6) → blue
 
 # Prediction-box overlay colours (used in comparison/annotation mode)
 PRED_COLOURS = {
@@ -95,10 +122,10 @@ PRED_COLOURS = {
 HU_MIN = 300 - 900 / 2   # = -150
 HU_MAX = 300 + 900 / 2   # =  750
 
-# Paper legend entries (for legend patches)
+# Paper legend entries — matches Figure 3 legend exactly
 PAPER_LEGEND = [
     ('#4CAF50', 'No-lesion'),
-    ('#FFD700', 'Non-significant stenosis'),
+    ('#FFC107', 'Non-significant stenosis'),
     ('#FF6600', 'Significant stenosis'),
     ('#2196F3', 'Calcified plaque'),
     ('#FF80AB', 'Non-calcified plaque'),
@@ -610,31 +637,47 @@ def render_artery(artery_id, volume, labels, save_path,
     n_cs  = max(len(cs_positions), 1)
 
     comparison_mode = od_outputs2 is not None
-    n_bar_rows      = 3 if comparison_mode else 2   # GT + model1 [+ model2]
+    n_models        = 3 if comparison_mode else 2   # GT + model1 [+ model2]
 
-    # ── Figure layout
-    bar_h = 0.35
-    hr    = [3] + [bar_h] * n_bar_rows + [1.8]
-    fig   = plt.figure(figsize=(max(14, n_cs * 3.5), sum(hr) * 1.4))
-    gs    = fig.add_gridspec(2 + n_bar_rows, n_cs,
-                             height_ratios=hr, hspace=0.18, wspace=0.25)
-    ax_strip    = fig.add_subplot(gs[0, :])
-    bar_axes    = [fig.add_subplot(gs[1 + i, :]) for i in range(n_bar_rows)]
-    cs_row_idx  = 1 + n_bar_rows
+    # ── Figure layout — 2 thin bars per model (stenosis + plaque), matching Fig 3
+    bar_h = 0.22   # height of each individual thin bar
+    # Build height_ratios: CPR strip | pairs of bars | cross-sections
+    hr = [3] + [bar_h, bar_h] * n_models + [1.8]
+    fig = plt.figure(figsize=(max(14, n_cs * 3.5), sum(hr) * 1.5))
+    gs  = fig.add_gridspec(1 + n_models * 2 + 1, n_cs,
+                           height_ratios=hr, hspace=0.04, wspace=0.25)
+    ax_strip   = fig.add_subplot(gs[0, :])
+    # model_axes[i] = (sten_ax, plaque_ax) for model i (0=GT, 1=model1, 2=model2)
+    model_axes = []
+    for i in range(n_models):
+        sten_ax   = fig.add_subplot(gs[1 + i * 2, :])
+        plaque_ax = fig.add_subplot(gs[2 + i * 2, :])
+        model_axes.append((sten_ax, plaque_ax))
+    cs_row_idx = 1 + n_models * 2
 
-    # ── Helper: draw one combined-label bar
-    def _draw_combined_bar(ax, labels_1d, row_label):
-        n       = len(labels_1d)
-        bar_rgb = np.zeros((1, n, 3))
+    # ── Helper: draw dual bars (stenosis on top, plaque below) for one model row
+    def _draw_dual_bars(sten_ax, plaque_ax, labels_1d, row_label):
+        n          = len(labels_1d)
+        sten_rgb   = np.zeros((1, n, 3))
+        plaque_rgb = np.zeros((1, n, 3))
         for i, lbl in enumerate(labels_1d):
-            bar_rgb[0, i, :] = mcolors.hex2color(
-                RAW_BAR_COLOURS.get(int(lbl), '#808080'))
-        ax.imshow(bar_rgb, aspect='auto', origin='upper', interpolation='nearest')
-        ax.set_xticks([])
-        ax.set_yticks([0])
-        ax.set_yticklabels([row_label], fontsize=8, fontweight='bold')
-        for spine in ax.spines.values():
-            spine.set_visible(False)
+            lbl = int(lbl)
+            sten_rgb[0, i, :]   = mcolors.hex2color(
+                STEN_BAR_COLOURS[_raw_to_sten_class(lbl)])
+            plaque_rgb[0, i, :] = mcolors.hex2color(
+                PLAQUE_BAR_COLOURS[_raw_to_plaque_class(lbl)])
+        sten_ax.imshow(sten_rgb,   aspect='auto', origin='upper',
+                       interpolation='nearest')
+        plaque_ax.imshow(plaque_rgb, aspect='auto', origin='upper',
+                         interpolation='nearest')
+        # Label on the left of the stenosis bar (vertically centred over both)
+        sten_ax.set_yticks([0])
+        sten_ax.set_yticklabels([row_label], fontsize=8, fontweight='bold')
+        plaque_ax.set_yticks([])
+        for ax in (sten_ax, plaque_ax):
+            ax.set_xticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
 
     # ── Helper: OD outputs → per-slice combined-label array (0-6)
     def _od_to_combined_labels(od_out, n_cls, conf_thresh=0.15):
@@ -689,18 +732,17 @@ def render_artery(artery_id, volume, labels, save_path,
         title = f'{artery_id}  |  GT: {STENOSIS_NAMES[sten_gt]}'
     ax_strip.set_title(title, fontsize=10, fontweight='bold', loc='left')
 
-    # ── Bars
-    _draw_combined_bar(bar_axes[0], labels, 'Ground Truth')
-    _draw_combined_bar(bar_axes[1], _od_to_combined_labels(od_outputs, num_classes), label1)
+    # ── Bars — dual (stenosis + plaque) per model row, matching Figure 3
+    _draw_dual_bars(*model_axes[0], labels, 'Ground Truth')
+    _draw_dual_bars(*model_axes[1], _od_to_combined_labels(od_outputs, num_classes), label1)
     if comparison_mode:
-        _draw_combined_bar(bar_axes[2],
-                           _od_to_combined_labels(od_outputs2, num_classes2), label2)
+        _draw_dual_bars(*model_axes[2],
+                        _od_to_combined_labels(od_outputs2, num_classes2), label2)
 
-    # ── Legend (paper colours, attached to GT bar)
+    # ── Legend (paper colours, 2 rows matching Figure 3 legend layout)
     legend_patches = [mpatches.Patch(facecolor=c, label=n) for c, n in PAPER_LEGEND]
-    bar_axes[0].legend(handles=legend_patches, loc='upper right',
-                       fontsize=7, ncol=len(legend_patches),
-                       framealpha=0.85, borderpad=0.4)
+    model_axes[0][0].legend(handles=legend_patches, loc='upper right',
+                            fontsize=7, ncol=3, framealpha=0.85, borderpad=0.4)
 
     # ── TP/FN detection for cross-section border styling
     if od_outputs is not None:

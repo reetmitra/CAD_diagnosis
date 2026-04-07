@@ -48,6 +48,13 @@ plots/
 create_presentation.py
 calibration_thresholds.json
 
+# Visualisation outputs (large binary — regenerate with visualize.py)
+viz*/
+test_gradcam_sample/
+test_uncertainty_*.json
+check_progress.sh
+TESTING_*.md
+
 # OS
 .DS_Store
 Thumbs.db
