@@ -2114,6 +2114,67 @@ Removed `_draw_label_bar`, `_draw_semantic_bar`, `_extract_per_slice_predictions
 
 ---
 
+## Phase 14b: Visualisation — Dual-Bar Layout Fix (2026-04-07)
+
+**File:** `visualize.py` | **Commit:** `0fe587b`
+
+The Phase 14 implementation used a single combined 6-class colour bar per model row (one colour per raw label 0–6). Closer inspection of Figure 3 revealed that the paper actually uses **two thin bars per model row**: one for stenosis severity, one for plaque composition. The single combined bar was incorrect.
+
+### 14b.1 Colour Maps
+
+Replaced `RAW_BAR_COLOURS` (single 7-colour map) with two separate maps:
+
+**`STEN_BAR_COLOURS`** (stenosis severity):
+
+| Class | Condition | Colour |
+| --- | --- | --- |
+| 0 | No-lesion | Green `#4CAF50` |
+| 1 | Non-significant stenosis | Yellow `#FFC107` |
+| 2 | Significant stenosis | Orange `#FF6600` |
+
+**`PLAQUE_BAR_COLOURS`** (plaque composition):
+
+| Class | Condition | Colour |
+| --- | --- | --- |
+| 0 | No-lesion | Green `#4CAF50` |
+| 1 | Calcified plaque | Blue `#2196F3` |
+| 2 | Non-calcified plaque | Pink `#FF80AB` |
+| 3 | Mixed plaque | Purple `#9C27B0` |
+
+Two helper functions map raw labels (0–6) to the correct class index for each bar:
+
+- `_raw_to_sten_class(lbl)` — `0→0`, `1-3→1` (non-sig), `4-6→2` (sig)
+- `_raw_to_plaque_class(lbl)` — `0→0`, `1,4→2` (non-calc), `2,5→3` (mixed), `3,6→1` (calc)
+
+### 14b.2 Figure Layout
+
+Replaced the `gridspec`-based layout (which had fixed inter-row spacing) with manual absolute axes positioning using `fig.add_axes([left, bottom, width, height])`. This gives pixel-perfect control over:
+
+- **Zero gap** between the stenosis and plaque bars within each model group — they read as a single unit
+- **Visible gap** between model groups (Ground Truth / v12-ft / v7-ft)
+- **Dedicated legend axes** below the bar block — no longer crammed into the GT bar's legend area
+- **Row label** (`Ground Truth`, model names) left-aligned via `ylabel`, visually centred between the two bars
+
+### 14b.3 Legend
+
+Moved from `model_axes[0][0].legend(...)` (inside the GT stenosis bar) to a standalone `ax_legend` axes spanning the full figure width below the bars. Six patches displayed in a single row matching the Figure 3 legend: No-lesion, Non-significant stenosis, Significant stenosis, Calcified plaque, Non-calcified plaque, Mixed plaque.
+
+### 14b.4 Full Regeneration
+
+All 3182 CPR images regenerated using:
+
+```
+visualize.py --pattern all --checkpoint checkpoints_v12_finetune/best_model.pth
+  --thresholds calibration_thresholds_v12_constrained.json --use_constrained
+  --checkpoint2 checkpoints_v7_finetune/final_model.pth
+  --thresholds2 calibration_thresholds_v7_constrained.json --use_constrained2
+  --label "v12-ft" --label2 "v7-ft" --output_dir viz_v12_paper
+```
+
+Output: `viz_v12_paper/` — 3182 PNGs, one per artery across all splits. Filenames encode outcome per model (e.g. `AP-NUH002_LAD__sten_Sig_m1_NonSig_WRONG_m2_Sig_CORRECT.png`) for easy filtering.
+
+---
+
 ## Phase 15: Native 1D Interval IoU (2026-04-06)
 
 **Files:** `functions.py`, `optimization.py` | **Commit:** `4c0058d`
