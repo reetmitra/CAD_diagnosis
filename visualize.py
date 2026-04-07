@@ -639,21 +639,61 @@ def render_artery(artery_id, volume, labels, save_path,
     comparison_mode = od_outputs2 is not None
     n_models        = 3 if comparison_mode else 2   # GT + model1 [+ model2]
 
-    # ── Figure layout — 2 thin bars per model (stenosis + plaque), matching Fig 3
-    bar_h = 0.22   # height of each individual thin bar
-    # Build height_ratios: CPR strip | pairs of bars | cross-sections
-    hr = [3] + [bar_h, bar_h] * n_models + [1.8]
-    fig = plt.figure(figsize=(max(14, n_cs * 3.5), sum(hr) * 1.5))
-    gs  = fig.add_gridspec(1 + n_models * 2 + 1, n_cs,
-                           height_ratios=hr, hspace=0.04, wspace=0.25)
-    ax_strip   = fig.add_subplot(gs[0, :])
-    # model_axes[i] = (sten_ax, plaque_ax) for model i (0=GT, 1=model1, 2=model2)
+    # ── Figure layout matching Figure 3:
+    #   CPR strip | [sten bar, plaque bar] × n_models with gap between groups | legend | cross-sections
+    # Use a manual axes layout so the two bars within each model group have zero gap,
+    # while there is a visible gap between model groups.
+    fig_w = max(14, n_cs * 3.5)
+    # Heights in inches: strip=2.0, each bar_pair=0.40, gap_between_models=0.15,
+    # legend=0.30, cs=1.8
+    strip_h   = 2.0
+    bar_pair  = 0.40    # total height of one sten+plaque pair
+    bar_half  = bar_pair / 2
+    gap       = 0.20    # gap between model groups
+    legend_h  = 0.30
+    cs_h      = 1.8
+    pad_top   = 0.45
+    pad_bot   = 0.25
+
+    total_h = (pad_top + strip_h
+               + gap + n_models * bar_pair + (n_models - 1) * gap
+               + gap + legend_h
+               + gap + cs_h + pad_bot)
+    fig = plt.figure(figsize=(fig_w, total_h))
+
+    def _make_ax(bottom_in, height_in):
+        """Create a full-width axes at absolute inch position."""
+        b = bottom_in / total_h
+        h = height_in / total_h
+        return fig.add_axes([0.08, b, 0.90, h])
+
+    # Build axes bottom-up
+    cs_bottom   = pad_bot
+    leg_bottom  = cs_bottom + cs_h + gap
+    bar_bottom  = leg_bottom + legend_h + gap
+
+    # Bars: model 0 at bottom of bar block, model n_models-1 at top
+    # We want GT at top, model1 below, model2 at bottom — so iterate reversed
     model_axes = []
-    for i in range(n_models):
-        sten_ax   = fig.add_subplot(gs[1 + i * 2, :])
-        plaque_ax = fig.add_subplot(gs[2 + i * 2, :])
-        model_axes.append((sten_ax, plaque_ax))
-    cs_row_idx = 1 + n_models * 2
+    cur = bar_bottom
+    for i in range(n_models - 1, -1, -1):
+        plaque_ax = _make_ax(cur,            bar_half)
+        sten_ax   = _make_ax(cur + bar_half, bar_half)
+        model_axes.insert(0, (sten_ax, plaque_ax))
+        cur += bar_pair + gap
+
+    strip_bottom = cur + gap * 0.5
+    ax_strip     = _make_ax(strip_bottom, strip_h)
+    ax_legend    = _make_ax(leg_bottom,   legend_h)
+
+    # Cross-section axes — split bottom strip into n_cs columns
+    cs_axes = []
+    cs_w = 0.90 / n_cs
+    for col in range(n_cs):
+        left = 0.08 + col * cs_w
+        ax   = fig.add_axes([left, cs_bottom / total_h, cs_w * 0.92,
+                             cs_h / total_h])
+        cs_axes.append(ax)
 
     # ── Helper: draw dual bars (stenosis on top, plaque below) for one model row
     def _draw_dual_bars(sten_ax, plaque_ax, labels_1d, row_label):
@@ -670,14 +710,16 @@ def render_artery(artery_id, volume, labels, save_path,
                        interpolation='nearest')
         plaque_ax.imshow(plaque_rgb, aspect='auto', origin='upper',
                          interpolation='nearest')
-        # Label on the left of the stenosis bar (vertically centred over both)
-        sten_ax.set_yticks([0])
-        sten_ax.set_yticklabels([row_label], fontsize=8, fontweight='bold')
-        plaque_ax.set_yticks([])
+        # Row label on the left, vertically centred between sten and plaque bars
+        sten_ax.set_ylabel(row_label, fontsize=8, fontweight='bold',
+                           rotation=0, labelpad=60, va='center', ha='right')
         for ax in (sten_ax, plaque_ax):
             ax.set_xticks([])
+            ax.set_yticks([])
             for spine in ax.spines.values():
                 spine.set_visible(False)
+        # Thin black line separating sten from plaque within the pair
+        sten_ax.axhline(y=0.5, color='white', linewidth=0.5, alpha=0.6)
 
     # ── Helper: OD outputs → per-slice combined-label array (0-6)
     def _od_to_combined_labels(od_out, n_cls, conf_thresh=0.15):
@@ -739,10 +781,13 @@ def render_artery(artery_id, volume, labels, save_path,
         _draw_dual_bars(*model_axes[2],
                         _od_to_combined_labels(od_outputs2, num_classes2), label2)
 
-    # ── Legend (paper colours, 2 rows matching Figure 3 legend layout)
+    # ── Legend — dedicated axes below the bars, matches Figure 3 legend layout
+    ax_legend.axis('off')
     legend_patches = [mpatches.Patch(facecolor=c, label=n) for c, n in PAPER_LEGEND]
-    model_axes[0][0].legend(handles=legend_patches, loc='upper right',
-                            fontsize=7, ncol=3, framealpha=0.85, borderpad=0.4)
+    ax_legend.legend(handles=legend_patches, loc='center', fontsize=8,
+                     ncol=len(PAPER_LEGEND), frameon=False,
+                     handlelength=2.0, handleheight=1.2,
+                     columnspacing=1.2, borderpad=0.2)
 
     # ── TP/FN detection for cross-section border styling
     if od_outputs is not None:
@@ -757,41 +802,40 @@ def render_artery(artery_id, volume, labels, save_path,
         fn_idx2 = set()
 
     # ── Cross-section panels
-    for col, (z_idx, raw_lbl) in enumerate(cs_positions):
-        ax_cs  = fig.add_subplot(gs[cs_row_idx, col])
-        cs_img = normalize_ct_data(volume[z_idx], hu_min=HU_MIN, hu_max=HU_MAX)
-        ax_cs.imshow(cs_img, cmap='gray', vmin=0, vmax=1, origin='upper')
-        ax_cs.set_xticks([])
-        ax_cs.set_yticks([])
+    for col, ax_cs in enumerate(cs_axes):
+        if col < len(cs_positions):
+            z_idx, raw_lbl = cs_positions[col]
+            cs_img = normalize_ct_data(volume[z_idx], hu_min=HU_MIN, hu_max=HU_MAX)
+            ax_cs.imshow(cs_img, cmap='gray', vmin=0, vmax=1, origin='upper')
+            ax_cs.set_xticks([])
+            ax_cs.set_yticks([])
 
-        seg_idx = None
-        for si, (s, e, _) in enumerate(segments):
-            if s <= z_idx < e:
-                seg_idx = si
-                break
+            seg_idx = None
+            for si, (s, e, _) in enumerate(segments):
+                if s <= z_idx < e:
+                    seg_idx = si
+                    break
 
-        border_c  = RAW_BAR_COLOURS.get(raw_lbl, 'white')
-        lw        = 3
-        linestyle = '-'
-        if seg_idx is not None and raw_lbl != 0:
-            if comparison_mode:
-                if seg_idx in fn_idx1 and seg_idx in fn_idx2:
-                    linestyle = '--'   # both models missed
+            border_c  = RAW_BAR_COLOURS.get(raw_lbl, 'white')
+            lw        = 3
+            linestyle = '-'
+            if seg_idx is not None and raw_lbl != 0:
+                if comparison_mode:
+                    if seg_idx in fn_idx1 and seg_idx in fn_idx2:
+                        linestyle = '--'   # both models missed
+                    elif seg_idx in fn_idx1:
+                        lw = 5             # model 2 caught what model 1 missed
                 elif seg_idx in fn_idx1:
-                    lw = 5             # model 2 caught what model 1 missed
-            elif seg_idx in fn_idx1:
-                linestyle = '--'       # single-model miss
+                    linestyle = '--'       # single-model miss
 
-        for spine in ax_cs.spines.values():
-            spine.set_visible(True)
-            spine.set_edgecolor(border_c)
-            spine.set_linewidth(lw)
-            spine.set_linestyle(linestyle)
-        ax_cs.set_title(f'z={z_idx}', color=border_c, fontsize=8)
-
-    # Fill unused columns
-    for col in range(len(cs_positions), n_cs):
-        fig.add_subplot(gs[cs_row_idx, col]).axis('off')
+            for spine in ax_cs.spines.values():
+                spine.set_visible(True)
+                spine.set_edgecolor(border_c)
+                spine.set_linewidth(lw)
+                spine.set_linestyle(linestyle)
+            ax_cs.set_title(f'z={z_idx}', color=border_c, fontsize=8)
+        else:
+            ax_cs.axis('off')
 
     plt.savefig(save_path, bbox_inches='tight', dpi=120)
     plt.close(fig)
