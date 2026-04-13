@@ -233,11 +233,41 @@ class _3d_extraction_block(nn.Module):
         return x
 
 
+class _FusionGate(nn.Module):
+    """Per-level SE-style gate that learns channel-wise 3D/2D fusion weights.
+
+    Replaces the scalar _3d_weight with content-dependent attention: given the
+    concatenated [x_3d, x_2d] features, a small squeeze-excitation network
+    outputs per-channel blend coefficients α ∈ (0,1) so that the fused output
+    is α*x_3d + (1-α)*x_2d.  Different channels can attend more to the 3D or
+    2D stream depending on local feature content.
+    """
+
+    def __init__(self, channels: int, reduction: int = 4):
+        super().__init__()
+        hidden = max(1, 2 * channels // reduction)
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Flatten(),
+            nn.Linear(2 * channels, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x_3d: torch.Tensor, x_2d: torch.Tensor) -> torch.Tensor:
+        alpha = self.gate(torch.cat([x_3d, x_2d], dim=1))  # [B, C]
+        alpha = alpha.view(x_3d.shape[0], x_3d.shape[1], 1, 1, 1)
+        return alpha * x_3d + (1.0 - alpha) * x_2d
+
+
 class feature_extraction_3d(nn.Module):
     def __init__(self, *, in_channels, conv_levels, f_maps, conv_num_3d, conv_num_2d, _2d_weight, _3d_weight):
         super().__init__()
 
         self.conv_levels = conv_levels
+        # _3d_weight kept as a registered parameter so old checkpoints load without key errors.
+        # It is no longer used in forward() — fusion is handled by _fusion_gates.
         self._3d_weight = nn.Parameter(torch.tensor(_3d_weight, dtype=torch.float32))
 
         self._3d_extraction_blocks = nn.ModuleList([
@@ -256,6 +286,12 @@ class feature_extraction_3d(nn.Module):
             for i in range(self.conv_levels)
         ])
 
+        # One fusion gate per level i > 0; each gate operates on channels = f_maps[i].
+        self._fusion_gates = nn.ModuleList([
+            _FusionGate(f_maps[i])
+            for i in range(1, self.conv_levels)
+        ])
+
     def forward(self, x):
         if x.dim() == 4:
             # Single-channel: [B, D, H, W] → [B, 1, D, H, W]
@@ -267,10 +303,10 @@ class feature_extraction_3d(nn.Module):
             if i == 0:
                 x_3d = self._3d_extraction_blocks[i](x)
                 x_2d = self._2d_extraction_blocks[i](x)
-            else :
+            else:
                 x_2d = self._2d_extraction_blocks[i](x_2d)
                 x_3d = self._3d_extraction_blocks[i](x_3d)
-                x_3d = self._3d_weight * x_3d + (1 - self._3d_weight) * x_2d
+                x_3d = self._fusion_gates[i - 1](x_3d, x_2d)
 
         return x_3d
 
