@@ -159,6 +159,8 @@ def parse_args(argv=None):
                         help='Min softmax confidence for Ldc pseudo-labels (default: 0.0 = no gating)')
     parser.add_argument('--soft_dc', action='store_true', default=False,
                         help='Use soft probability pseudo-labels for Ldc (KL-div instead of hard CE)')
+    parser.add_argument('--dc_temperature_start', type=float, default=3.0,
+                        help='Initial softmax temperature for DC soft pseudo-labels; anneals to 1.0 over dc_warmup_ramp (default: 3.0)')
     parser.add_argument('--label_smoothing', type=float, default=0.0,
                         help='Label smoothing epsilon for SC classification loss (default: 0.0)')
     parser.add_argument('--balanced_sampling', action='store_true',
@@ -612,6 +614,17 @@ class Trainer:
         # Update dc weight for delayed ramp
         dc_weight = self._compute_dc_weight(epoch)
         self.loss_fn.set_dc_weight(dc_weight)
+
+        # DC temperature annealing: high temperature early (soft targets), anneal to 1.0 by end of ramp
+        dc_temp_start = getattr(self.args, 'dc_temperature_start', 3.0)
+        hold = getattr(self.args, 'dc_warmup_hold', 0)
+        ramp = getattr(self.args, 'dc_warmup_ramp', 0)
+        if ramp > 0 and epoch < hold + ramp:
+            frac = max(0.0, (epoch - hold) / ramp)   # 0→1 during ramp
+            dc_temp = dc_temp_start - frac * (dc_temp_start - 1.0)
+        else:
+            dc_temp = 1.0
+        self.loss_fn.set_dc_temperature(dc_temp)
 
         total_loss = 0.0
         total_od = 0.0
