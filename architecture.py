@@ -268,7 +268,7 @@ class feature_extraction_3d(nn.Module):
                 x_3d = self._3d_extraction_blocks[i](x)
                 x_2d = self._2d_extraction_blocks[i](x)
             else :
-                x_2d = self._2d_extraction_blocks[i](x_3d)
+                x_2d = self._2d_extraction_blocks[i](x_2d)
                 x_3d = self._3d_extraction_blocks[i](x_3d)
                 x_3d = self._3d_weight * x_3d + (1 - self._3d_weight) * x_2d
 
