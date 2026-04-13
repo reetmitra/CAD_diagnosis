@@ -1,0 +1,104 @@
+# SC-Net v13 fine-tuning — from v13 pre-trained checkpoint
+#
+#   Base: v12 best params (T0=60, patience=100, dc_hold=20, ramp=40, delta=0.5,
+#         SWA@80, 1D IoU, F1 checkpoint, boost_nonsig, ordinal EMD, soft DC)
+#
+#   New in v13 (all architectural improvements from Approach A):
+#
+#   1. Truly parallel 2D/3D feature streams (requires v13 pre-trained backbone)
+#   2. SE attention fusion gates (v13 backbone has trained gate weights)
+#   3. DC temperature annealing: starts at 3.0, anneals to 1.0 over the DC ramp
+#      - More stable early fine-tuning when 6-class heads are freshly initialised
+#      - Temperature reaches 1.0 by epoch dc_hold + dc_ramp = 60
+#
+#   4. Extended patience (120 vs 100): larger model with fresh gate params
+#      needs more runway before early stopping fires
+#
+#   5. lr=2.5e-5 (slightly lower than v12's 3.0e-5): new gate parameters are
+#      already partially trained from pre-training; a lower peak LR prevents
+#      overshooting their converged values.
+#
+# Usage (2x GPU — recommended):
+#   torchrun --nproc_per_node=2 --master_port=29506 train.py --distributed \
+#     --config configs/finetune_v13.yaml \
+#     --pretrained ./checkpoints_v13/best_model.pth
+#
+# Expected improvement over v12:
+#   Parallel streams + attention fusion add feature diversity in the spatial
+#   branch. DC temperature prevents noisy early pseudo-labels from locking in
+#   bad representations when the 6-class heads are uninitialised. Together
+#   these should push Stenosis F1 beyond 0.739 toward 0.80+.
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 300
+lr: 2.5e-5
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+# LR schedule: T0=60 matches v12 (peak F1 strategy); patience=120
+lr_schedule: cosine_warm_restarts
+lr_t0: 60
+lr_t_mult: 2
+
+# SWA: start at epoch 100 (slightly later — more epochs for gate convergence)
+swa: true
+swa_start_epoch: 100
+
+# DC settings: hold=20 proven stable, ramp=40, delta=0.5
+dc_warmup_hold: 20
+dc_warmup_ramp: 40
+delta: 0.5
+dc_confidence_threshold: 0.4
+soft_dc: true
+
+# DC temperature annealing: 3.0 → 1.0 over the ramp window (epochs 20–60)
+dc_temperature_start: 3.0
+
+# Label smoothing
+label_smoothing: 0.1
+
+# Ordinal loss
+ordinal_weight: 0.5
+
+# Early stopping — patience=120 for extended runway with fresh gate params
+patience: 120
+min_delta: 0.001
+
+# Class imbalance handling (same as v12)
+balanced_sampling: true
+sc_class_weight: true
+boost_nonsig: true
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.15
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+
+# Training infrastructure
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 8
+seed: 42
+patient_split: true
+split_seed: 42
+
+# Transformer architecture (must match v13 pre-training)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging
+checkpoint_dir: ./checkpoints_v13_finetune
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10

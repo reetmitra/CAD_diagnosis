@@ -1,0 +1,93 @@
+# SC-Net v13 pre-training — with all Approach A architectural improvements:
+#
+#   Changes vs v10:
+#
+#   1. Truly parallel 2D/3D feature streams (architecture.py fix):
+#      - 2D extraction blocks at levels 1+ now receive their own previous
+#        2D features instead of 3D features. Streams are now truly independent
+#        as described in the paper (Fig. 2). Old v10 checkpoint weights will
+#        transfer for the 3D branch; the 2D branch re-learns from scratch.
+#
+#   2. SE attention fusion gates (architecture.py):
+#      - Per-level _FusionGate (SE-style) replaces the scalar _3d_weight blend.
+#        Gate parameters initialise fresh — pre-training gives them a full
+#        curriculum from scratch to learn content-dependent 3D/2D weighting.
+#
+#   3. Longer schedule (300 epochs):
+#      - v10 ran 200 epochs; the new gate parameters need more epochs to
+#        converge alongside the rest of the model.
+#
+#   4. Cosine warm restarts for pre-training:
+#      - v10 used no explicit LR schedule (relied on warmup only).
+#        T0=80 lets LR cycle twice in 300 epochs; each restart escapes
+#        local minima that the straight cosine decay could miss.
+#
+#   5. DC temperature annealing enabled:
+#      - dc_temperature_start=3.0 so early contrastive pseudo-labels are soft
+#        (model predictions unreliable at start of pre-training).
+#        Temperature anneals to 1.0 by the end of the DC ramp.
+#
+#   Note: _3d_weight is still present in state-dict but unused in forward().
+#   Loading a v10 checkpoint into this model works (unexpected key warning only).
+#
+# Usage (2x GPU — recommended):
+#   torchrun --nproc_per_node=2 --master_port=29505 train.py --distributed \
+#     --config configs/pretrain_v13.yaml
+#
+# Usage (single GPU):
+#   python train.py --config configs/pretrain_v13.yaml
+
+pattern: pre_training
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 300
+lr: 1.0e-4
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+# LR schedule: cosine warm restarts, T0=80 → two full cycles in 300 epochs
+lr_schedule: cosine_warm_restarts
+lr_t0: 80
+lr_t_mult: 2
+
+# EMA
+ema: true
+ema_decay: 0.999
+
+# DC loss settings (pre-training: delta=1.0, standard ramp)
+delta: 1.0
+dc_warmup_hold: 20
+dc_warmup_ramp: 40
+soft_dc: true
+dc_confidence_threshold: 0.3
+dc_temperature_start: 3.0
+
+# Class imbalance
+sc_class_weight: true
+ordinal_weight: 0.5
+focal_loss: false     # pre-training uses standard CE; focal reserved for fine-tune
+
+# Augmentation (CDA is offline — keep false as per v10)
+augment: false
+amp: true
+layerwise_lr: true
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+num_workers: 8
+seed: 42
+
+# Transformer architecture (must match downstream fine-tuning)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging and checkpoints
+checkpoint_dir: ./checkpoints_v13
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10
