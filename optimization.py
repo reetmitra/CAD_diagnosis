@@ -306,7 +306,8 @@ def sc2od_targets(sc_point_data, seq_length):
 
 class dual_task_contrastive_loss(nn.Module):
     def __init__(self, od_contrastive_loss, sc_contrastive_loss, seq_length,
-                 confidence_threshold=0.0, use_soft_labels=False):
+                 confidence_threshold=0.0, use_soft_labels=False,
+                 dc_temperature: float = 1.0):
         super().__init__()
 
         self.od_contrastive_loss = od_contrastive_loss
@@ -315,6 +316,10 @@ class dual_task_contrastive_loss(nn.Module):
         self.seq_length = seq_length
         self.confidence_threshold = confidence_threshold
         self.use_soft_labels = use_soft_labels
+        self.dc_temperature = dc_temperature
+
+    def set_dc_temperature(self, temperature: float) -> None:
+        self.dc_temperature = max(temperature, 1.0)
 
     def _get_object_detection_targets(self, sc_outputs):
 
@@ -396,7 +401,7 @@ class dual_task_contrastive_loss(nn.Module):
                                       device=logits.device, dtype=torch.float32)
             soft_target[:, 0] = 1.0  # default to background
 
-            probs = torch.softmax(selected_logits, dim=1)
+            probs = torch.softmax(selected_logits / self.dc_temperature, dim=1)
             num_od_classes = selected_logits.shape[-1] - 1
 
             interval = 1.0 / (self.seq_length + 1)
@@ -459,7 +464,7 @@ class spatio_temporal_contrast_loss(nn.Module):
                  use_focal=False, focal_gamma=2.0,
                  dc_confidence_threshold=0.0,
                  label_smoothing=0.0, use_soft_dc=False,
-                 ordinal_weight=0.0):
+                 ordinal_weight=0.0, dc_temperature: float = 1.0):
         super().__init__()
 
         self.num_classes = num_classes
@@ -480,11 +485,15 @@ class spatio_temporal_contrast_loss(nn.Module):
         self.dc_loss = dual_task_contrastive_loss(
             self.od_loss, self.sc_loss, seq_length=self.seq_length,
             confidence_threshold=dc_confidence_threshold,
-            use_soft_labels=use_soft_dc)
+            use_soft_labels=use_soft_dc,
+            dc_temperature=dc_temperature)
 
     def set_dc_weight(self, weight):
         """Set the current dc loss weight (for delayed ramp scheduling)."""
         self.dc_weight = weight
+
+    def set_dc_temperature(self, temperature: float) -> None:
+        self.dc_loss.set_dc_temperature(temperature)
 
     def forward(self, od_outputs, sc_outputs, od_targets):
 
