@@ -2273,3 +2273,203 @@ Training trajectory (250 epochs, 2×RTX 3090):
 Checkpoint: `checkpoints_v12_finetune/best_model.pth`
 Calibration: `calibration_thresholds_v12_constrained.json`
 
+---
+
+## Phase 17: True Parallel 2D/3D Feature Streams (2026-04-13)
+
+**Files:** `architecture.py` | **Commit:** `864dba9`
+
+### 17.1 Problem
+
+In `feature_extraction_3d.forward()`, the 2D extraction block at levels `i > 0` was receiving the 3D stream output (`x_3d`) as its input instead of its own previous 2D output (`x_2d`). This caused both streams to process near-identical feature maps from level 1 onward, making the "dual-stream" design functionally a single-stream architecture.
+
+The paper (Fig. 2) explicitly describes independent parallel 2D and 3D feature paths that fuse only at each level's output. The bug existed in all training runs v1–v12.
+
+### 17.2 Fix
+
+Single-word change on line 271 of `architecture.py`:
+
+```python
+# Before (bug — 2D gets 3D features at levels 1+):
+x_2d = self._2d_extraction_blocks[i](x_3d)
+
+# After (fix — 2D stream feeds back into itself):
+x_2d = self._2d_extraction_blocks[i](x_2d)
+```
+
+`x_2d` was already in scope from the `i == 0` branch — no new variables needed.
+
+### 17.3 Impact
+
+Existing checkpoints (`v12_finetune/best_model.pth`) remain loadable — no parameter shapes changed. However, re-training from pre-train is required to benefit from truly independent streams, because the existing 2D extraction block weights at levels 1–3 were trained on 3D features (wrong distribution). A fresh v13 pre-train will let them learn from actual 2D stream features from the start.
+
+**Expected gain:** Better feature diversity in the spatial branch (+2–5% F1).
+
+---
+
+## Phase 18: SE Attention-Based View Fusion (2026-04-13)
+
+**Files:** `architecture.py` | **Commit:** `b7ea87b`
+
+### 18.1 Problem
+
+The 3D/2D stream fusion at each level used a single learned scalar `_3d_weight`:
+
+```python
+x_3d = self._3d_weight * x_3d + (1 - self._3d_weight) * x_2d
+```
+
+This scalar is the same for all channels, all spatial positions, and all samples. But the relative informativeness of the 3D vs 2D view depends on the local anatomy — calcified plaques have strong HU contrast visible in coronal 2D slices, while volumetric context matters more for diffuse stenosis. A single global weight cannot capture this variation.
+
+### 18.2 Fix
+
+Added a `_FusionGate` class (Squeeze-and-Excitation style) and one instance per fusion level:
+
+```python
+class _FusionGate(nn.Module):
+    def __init__(self, channels: int, reduction: int = 4):
+        hidden = max(1, 2 * channels // reduction)
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),     # global avg pool → [B, 2C]
+            nn.Flatten(),
+            nn.Linear(2*channels, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, channels),
+            nn.Sigmoid(),                # per-channel alpha ∈ (0,1)
+        )
+
+    def forward(self, x_3d, x_2d):
+        alpha = self.gate(torch.cat([x_3d, x_2d], dim=1))  # [B, C]
+        alpha = alpha.view(B, C, 1, 1, 1)
+        return alpha * x_3d + (1 - alpha) * x_2d
+```
+
+`feature_extraction_3d` now holds `self._fusion_gates = nn.ModuleList([_FusionGate(f_maps[i]) for i in range(1, conv_levels)])` — one gate per fusion level.
+
+The original `_3d_weight` scalar parameter is kept registered (but no longer called in `forward`) so that old checkpoints load without missing-key errors.
+
+### 18.3 Parameter Count
+
+With `f_maps = [128, 256, 256, 256]` and `reduction = 4`:
+- Level 1 gate: 2×128→64→128 = ~24K params
+- Level 2 gate: 2×256→128→256 = ~98K params
+- Level 3 gate: same = ~98K params
+- **Total new params: ~220K** (small relative to total model size)
+
+### 18.4 Impact
+
+Old checkpoints load cleanly (unexpected key warning for `_3d_weight` only). Full v13 pre-train required for gate weights to converge. **Expected gain:** Better spatial branch accuracy for anatomically variable cases (+1–3% F1).
+
+---
+
+## Phase 19: DC Temperature Annealing (2026-04-13)
+
+**Files:** `optimization.py`, `train.py` | **Commits:** `fe9e990`, `984b602`
+
+### 19.1 Problem
+
+`dual_task_contrastive_loss._compute_soft_sc_loss()` used `torch.softmax(logits, dim=1)` at fixed temperature τ=1.0 to produce OD→SC pseudo-label distributions. Early in training (especially at the start of fine-tuning when 6-class heads are freshly initialised), these predictions are nearly random. At τ=1.0, even a slightly-winning class gets amplified into an overconfident pseudo-label, injecting noise into the other branch's supervision.
+
+### 19.2 Fix
+
+Added `dc_temperature` parameter to `dual_task_contrastive_loss` and `spatio_temporal_contrast_loss`. Temperature is applied as `softmax(logits / τ)`:
+
+```python
+# optimization.py — _compute_soft_sc_loss:
+probs = torch.softmax(selected_logits / self.dc_temperature, dim=1)
+```
+
+Two new methods allow the trainer to update temperature per epoch:
+
+```python
+dual_task_contrastive_loss.set_dc_temperature(temperature)
+spatio_temporal_contrast_loss.set_dc_temperature(temperature)  # delegates to dc_loss
+```
+
+`train.py` anneals temperature linearly from `dc_temperature_start` → 1.0 over the DC ramp window, immediately after setting `dc_weight`:
+
+```python
+frac = max(0.0, (epoch - hold) / ramp)   # 0 → 1 during ramp
+dc_temp = dc_temp_start - frac * (dc_temp_start - 1.0)
+self.loss_fn.set_dc_temperature(dc_temp)
+```
+
+New CLI arg: `--dc_temperature_start` (default `3.0`). Default `dc_temperature=1.0` preserves existing behaviour exactly when the arg is not provided.
+
+### 19.3 Schedule
+
+With v13 config (`dc_hold=20, dc_ramp=40, dc_temperature_start=3.0`):
+
+| Epoch range | τ | Notes |
+|---|---|---|
+| 0–20 | 3.0 | DC hold — heads settling, soft targets protect against noise |
+| 20–60 | 3.0 → 1.0 | DC ramp — temperature falls as predictions improve |
+| 60+ | 1.0 | DC plateau — standard softmax for full precision |
+
+### 19.4 Impact
+
+**No behaviour change** for existing configs (default τ=1.0). **Expected gain:** Faster convergence in early fine-tuning, fewer bad pseudo-label loops (+1–2% F1 in the first 30 epochs).
+
+---
+
+## v13 Configs Summary (2026-04-13)
+
+**Commits:** `c482707`
+
+Two configs created incorporating all Phase 17–19 improvements:
+
+### `configs/pretrain_v13.yaml`
+
+| Setting | Value | Rationale |
+|---|---|---|
+| epochs | 300 | SE gate params need more curriculum than v10's 200 |
+| lr_schedule | cosine_warm_restarts | Two LR cycles in 300 epochs |
+| lr_t0 | 80 | Restarts at ep80 and ep240 |
+| dc_temperature_start | 3.0 | Soft pseudo-labels during pre-train DC ramp |
+| soft_dc | true | KL-div with temperature-scaled targets |
+| ordinal_weight | 0.5 | Same as v10 — penalise severity mismatches |
+| checkpoint_dir | ./checkpoints_v13 | — |
+
+### `configs/finetune_v13.yaml`
+
+| Setting | Value | vs v12 |
+|---|---|---|
+| lr | 2.5e-5 | Lower (3.0e-5 in v12) — protect pre-trained gate weights |
+| patience | 120 | Extended (100 in v12) — fresh gates need more runway |
+| swa_start_epoch | 100 | Later (80 in v12) — allow gates to settle first |
+| dc_temperature_start | 3.0 | New — soft targets during 6-class head initialisation |
+| All v12 settings | retained | boost_nonsig, ordinal EMD, focal, 1D IoU, F1 metric |
+| checkpoint_dir | ./checkpoints_v13_finetune | — |
+
+### Run Order on Office GPUs
+
+```bash
+# Step 1 — Pre-train (GPU 0+1, ~12–18hr)
+torchrun --nproc_per_node=2 --master_port=29505 train.py --distributed \
+  --config configs/pretrain_v13.yaml
+
+# Step 2 — Fine-tune from v13 backbone (GPU 0+1, ~20–30hr)
+torchrun --nproc_per_node=2 --master_port=29506 train.py --distributed \
+  --config configs/finetune_v13.yaml \
+  --pretrained ./checkpoints_v13/best_model.pth
+
+# Step 3 — Calibrate on train split
+python calibrate.py \
+  --checkpoint checkpoints_v13_finetune/best_model.pth \
+  --pattern fine_tuning --data_root ./dataset/train \
+  --output_file calibration_thresholds_v13_constrained.json \
+  --constrain_nonsig_recall 0.10
+
+# Step 4 — Evaluate on test set
+python eval.py \
+  --checkpoint checkpoints_v13_finetune/best_model.pth \
+  --pattern fine_tuning --data_root ./dataset/test \
+  --data_split all --batch_size 2 --eval_sc --detailed \
+  --use_constrained \
+  --calibration_file calibration_thresholds_v13_constrained.json \
+  --save_results results_v13ft_calibrated.json
+```
+
+**Expected Stenosis F1:** 0.78–0.85 (vs v12's 0.739). Biggest contributors: parallel 2D/3D streams (+feature diversity) and DC temperature (+stable early fine-tuning).
+
+
