@@ -2657,4 +2657,300 @@ The **Stenosis AUC** is the cleanest signal. It measures discrimination independ
 
 A full eval (calibration + test-set) will be run as soon as training completes. Results will replace these projections.
 
+---
+
+## Phase 23 — Model Output Tracking: Prediction Traceability Plan
+
+Plan prepared: 2026-04-16 | Implementation deferred (requires personal machine)
+
+### 23.1 Objective
+
+Add a `--save_predictions` flag to `visualize.py` that writes a structured JSON file for every artery processed. The JSON records every number the model produces — from raw logits through to the per-slice colour values painted in the CPR bar — making every prediction fully traceable and auditable.
+
+The output should answer: *"for this artery, which query fired, at what confidence, covering which slices, and why did the model call it Significant/Non-sig/Healthy?"*
+
+---
+
+### 23.2 Architecture Data Flow (what numbers exist and where)
+
+Understanding the pipeline end-to-end is required before deciding what to save.
+
+#### Stage 1 — Feature Extraction (`feature_extraction_3d`)
+
+Input: `[B, 1, 256, 64, 64]` (single-channel volume, vessel axis = 256)
+
+Four hierarchical levels (conv_levels=4):
+
+- Level 0: input volume → `x_3d`, `x_2d` independently via `_3d_extraction_block` and `_2d_extraction_block`
+- Levels 1–3: `x_2d` feeds into its own `_2d_extraction_block` (v13 fix — was `x_3d` in v10–v12); `x_3d` feeds into its own `_3d_extraction_block`; then fused via `_FusionGate`
+
+`_FusionGate` outputs: `α * x_3d + (1-α) * x_2d` where `α ∈ (0,1)^C` is a per-channel attention weight learned from the concatenated features. The gate weight `α` is the **first trackable intermediate** — values near 1.0 mean the 3D stream dominates for that channel; values near 0.0 mean the 2D slice views dominate.
+
+#### Stage 2 — Flattening + Transformer (`spatial_flattening_projection`, `nn.Transformer`)
+
+Fused feature map `x_3d` shape after 4 levels: `[B, 512, 4, 4, 4]` (approximate, depends on pooling)
+
+- `spatial_flattening_projection`: Conv3d(512→proj_ch) then Linear → memory embeddings `emb_f` shape `[seq_len, B, D_model]`
+- Learned query embeddings `emb_q` shape `[num_query=16, B, D_model]` from `nn.Embedding(16, D_model)`
+- `nn.Transformer(encoder_layers=4, decoder_layers=4)`: cross-attends queries to memory → decoder output `[B, 16, D_model]`
+
+Each of the 16 decoder output vectors represents one candidate lesion query.
+
+#### Stage 3 — Detection Head (`bounding_box_prediction`)
+
+Applied per query (16 calls):
+
+```text
+pred_logits [B, 16, 7]  ←  class_prediction MLP: D_model → hidden → (num_classes+1=7)
+pred_boxes  [B, 16, 2]  ←  boxes_prediction  MLP: D_model → hidden → 2, then .sigmoid()
+```
+
+- `pred_logits[b, q, c]`: raw logit for query `q`, class `c`; class 6 = no-object
+- `pred_boxes[b, q, 0]`: `cx_norm` ∈ (0,1) — centre along vessel axis (normalised)
+- `pred_boxes[b, q, 1]`: `w_norm` ∈ (0,1) — width along vessel axis (normalised)
+
+The `.sigmoid()` on the box output enforces [0,1] range — no coordinate normalisation issues.
+
+#### Stage 4 — Calibration (`predict_artery` in `visualize.py`)
+
+If calibration thresholds `stenosis_t = [t_H, t_NS, t_Sig]` are provided:
+
+```python
+probs = softmax(pred_logits)        # [Q, 7]
+t_vec = [t_H, t_NS, t_Sig, 1, 1, 1, 1]
+cal_logits = log(probs / t_vec + ε) # [Q, 7]  — this overwrites pred_logits in od_outputs
+```
+
+After this step, `od_outputs['pred_logits']` contains calibrated logits (not raw). The raw logits are discarded unless explicitly saved.
+
+#### Stage 5 — Visualisation Rendering (`_od_to_combined_labels` in `visualize.py`)
+
+Converts per-query outputs → per-slice combined label array (0–6):
+
+```python
+probs = softmax(cal_logits)     # [Q, 7]
+pred_cls = probs.argmax(dim=-1) # [Q]
+for each query q:
+    cls = pred_cls[q]
+    if cls >= num_classes: continue      # no-object
+    if fg_prob <= no_obj_prob: continue  # no-object wins
+    if fg_prob < conf_thresh=0.15: continue
+    x0 = (cx - w/2) * D; x1 = (cx + w/2) * D
+    out[x0:x1] = max(out[x0:x1], cls+1) # raw_lbl = cls+1 (1-indexed combined label)
+```
+
+This produces `label_array[256]` — the colour-per-slice data that feeds directly into the CPR bar image.
+
+#### Stage 6 — Temporal Branch (`temporal_semantic_learning`, SC branch)
+
+Runs independently of the spatial branch on the same input:
+
+- 32 cubes extracted along vessel axis, each `[cube_size^3]`
+- Per-cube: Conv3d → flatten → Linear projection → `[B, 32, 512]`
+- Positional encoding added → Transformer encoder → per-point class logits `[B, 32, 7]`
+- `softmax_classify.forward()` returns probabilities `[B, 32, 7]` at inference
+
+The SC branch vote-aggregates to an artery-level class in `od_predictions_to_artery_level`. Its per-point probabilities are a second source of classification signal, currently unused in visualize.py.
+
+---
+
+### 23.3 Implementation Plan
+
+#### Step 1 — Add `--save_predictions` flag to `visualize.py`
+
+In `parse_args()`, add:
+
+```python
+parser.add_argument('--save_predictions', type=str, default=None,
+                    help='Directory to write per-artery prediction JSON files. '
+                         'If omitted, no JSONs are written.')
+```
+
+#### Step 2 — Capture raw logits before calibration
+
+In `predict_artery()`, save the raw logits before the calibration step overwrites them:
+
+```python
+raw_logits = od_outputs['pred_logits'].clone()   # [Q, C+1], BEFORE threshold scaling
+raw_probs  = F.softmax(raw_logits, dim=-1)       # [Q, C+1]
+```
+
+Then proceed with calibration as currently written. After calibration:
+
+```python
+cal_logits = od_outputs['pred_logits']           # [Q, C+1], AFTER threshold scaling
+cal_probs  = F.softmax(cal_logits, dim=-1)       # [Q, C+1]
+```
+
+Return both sets from `predict_artery()`:
+
+```python
+return stenosis_pred, plaque_pred, od_outputs, raw_logits, raw_probs, cal_logits, cal_probs
+```
+
+#### Step 3 — New `build_prediction_record()` function
+
+Add a new function that assembles the full JSON record for one artery:
+
+```python
+def build_prediction_record(artery_id, labels, stenosis_gt,
+                             stenosis_pred, plaque_pred,
+                             od_outputs, raw_logits, raw_probs,
+                             cal_logits, cal_probs,
+                             stenosis_t, plaque_t,
+                             num_classes, D):
+```
+
+**JSON schema (one file per artery):**
+
+```json
+{
+  "artery_id": "APNHC00002_LAD",
+  "stenosis_gt": 2,
+  "stenosis_gt_name": "Significant",
+  "stenosis_pred": 2,
+  "stenosis_pred_name": "Significant",
+  "plaque_pred": 0,
+  "plaque_pred_name": "Calcified",
+  "correct": true,
+
+  "gt_label_array": [0, 0, ..., 4, 4, 4, ...],    // 256 ints, 0–6
+
+  "calibration": {
+    "stenosis_thresholds": [2.80, 0.65, 0.20],
+    "plaque_thresholds": [1.19, 1.59, 0.46]
+  },
+
+  "pred_label_array": [0, 0, ..., 6, 6, 6, ...],  // 256 ints, 0–6, what the CPR bar shows
+
+  "queries": [
+    {
+      "query_idx": 0,
+      "raw_logits":  [-1.2, 0.4, 2.1, -0.8, 0.1, -0.3, 0.5],  // [C+1] before calibration
+      "raw_probs":   [0.04, 0.10, 0.47, 0.06, 0.08, 0.05, 0.20],
+      "cal_logits":  [-0.9, 0.7, 2.9, -0.8, 0.1, -0.3, 0.5],  // [C+1] after calibration
+      "cal_probs":   [0.03, 0.08, 0.62, 0.05, 0.07, 0.04, 0.11],
+      "pred_class":      2,
+      "pred_class_name": "Significant",
+      "confidence":      0.62,
+      "no_object_prob":  0.11,
+      "cx_norm":  0.512,           // box centre (fraction of vessel length)
+      "w_norm":   0.180,           // box width  (fraction of vessel length)
+      "x0_px":    104,             // pixel start on 256-pt vessel axis
+      "x1_px":    127,             // pixel end
+      "survives_filter": true,     // passed no-object + conf_thresh check
+      "contributes_to_bar": true   // was actually painted in CPR bar
+    },
+    // ... 15 more queries
+  ]
+}
+```
+
+**Key fields explained:**
+
+| Field | Why it matters |
+| --- | --- |
+| `raw_logits` / `raw_probs` | What the model actually learned; independent of calibration |
+| `cal_logits` / `cal_probs` | After `log(p/t)` scaling; what the argmax decision is based on |
+| `confidence` | `cal_probs[pred_class]` — the model's certainty for the winning class |
+| `no_object_prob` | `cal_probs[num_classes]` — the no-object competition; `survives_filter` = confidence > this |
+| `cx_norm`, `w_norm` | Exact box coordinates in [0,1] vessel-axis space |
+| `x0_px`, `x1_px` | The slice range coloured in the CPR bar |
+| `pred_label_array` | Ground truth for "what the CPR bar shows" — enables slice-level accuracy analysis |
+
+#### Step 4 — Integrate into `main()` loop
+
+After `predict_artery()` returns, call `build_prediction_record()` and write to file:
+
+```python
+if args.save_predictions:
+    os.makedirs(args.save_predictions, exist_ok=True)
+    record = build_prediction_record(
+        artery_id, labels, sten_gt,
+        stenosis_pred, plaque_pred,
+        od_outputs, raw_logits, raw_probs, cal_logits, cal_probs,
+        stenosis_t, plaque_t, num_classes, D=volume.shape[0]
+    )
+    json_path = os.path.join(args.save_predictions, f'{artery_id}.json')
+    with open(json_path, 'w') as f:
+        json.dump(record, f, indent=2)
+```
+
+In comparison mode (two models), write two keys `model1` and `model2` within the same record.
+
+#### Step 5 — Batch summary file
+
+After processing all arteries, write a single `predictions_summary.jsonl` (one JSON object per line) containing only the artery-level fields (no per-query detail). This enables fast loading for statistical analysis without reading all 665 individual files.
+
+---
+
+### 23.4 Usage
+
+**Generate predictions alongside v13 CPR visualisations:**
+
+```bash
+python visualize.py \
+  --data_root ./dataset/test \
+  --pattern all \
+  --checkpoint checkpoints_v13_finetune/best_model.pth \
+  --thresholds calibration_thresholds_v13_constrained.json \
+  --use_constrained \
+  --output_dir viz_v13 \
+  --save_predictions predictions_v13/
+```
+
+**Inspect a specific artery:**
+
+```bash
+python -c "
+import json
+with open('predictions_v13/APNHC00002_LAD.json') as f:
+    d = json.load(f)
+print('GT:', d['stenosis_gt_name'], '| Pred:', d['stenosis_pred_name'])
+for q in d['queries']:
+    if q['survives_filter']:
+        print(f'  Q{q[\"query_idx\"]}: {q[\"pred_class_name\"]} conf={q[\"confidence\"]:.3f} '
+              f'x={q[\"x0_px\"]}..{q[\"x1_px\"]}')
+"
+```
+
+**Compare v12 vs v13 query confidence distributions:**
+
+```bash
+# Load predictions_summary.jsonl from both runs → compare mean confidence,
+# number of surviving queries per artery, box width distributions by GT class
+```
+
+---
+
+### 23.5 Analyses Enabled
+
+| Question | How to answer |
+| --- | --- |
+| Which queries fire for True Positive arteries? | Filter `correct=true`, look at `survives_filter` queries |
+| What is the model's confidence distribution by GT class? | Aggregate `confidence` across all surviving queries by `stenosis_gt` |
+| Where do False Negatives occur (missed lesions)? | `correct=false, stenosis_gt=2`: look at `pred_label_array` vs `gt_label_array` |
+| Does calibration change the winning class? | Compare `raw_probs.argmax` vs `cal_probs.argmax` per query |
+| Are there high-confidence wrong predictions? | `correct=false` AND `max(confidence) > 0.7` |
+| What does the model predict per slice? | `pred_label_array[i]` — direct colour-to-number mapping |
+| SE gate weights per level | Extend `build_prediction_record()` to extract `_fusion_gates[i].alpha` values (needs hook) |
+
+---
+
+### 23.6 Files to Modify
+
+| File | Change |
+| --- | --- |
+| `visualize.py` | Add `--save_predictions` arg; save raw logits before calibration in `predict_artery()`; new `build_prediction_record()` function; integrate into `main()` loop |
+| No other files need to change | eval.py, architecture.py, optimization.py — no modifications required |
+
+---
+
+### 23.7 Implementation Notes
+
+- `raw_logits` must be `.clone()`-d before calibration, since `predict_artery()` currently overwrites `od_outputs['pred_logits']` in-place with the scaled version.
+- Convert all tensors to plain Python lists (`.tolist()`) before `json.dump()`.
+- The `pred_label_array` should be derived from the same `_od_to_combined_labels()` call used for rendering, not recomputed — ensures the JSON exactly matches the PNG.
+- For the SC branch, a parallel `sc_queries` block can be added using the same pattern, recording the per-cube logits and probabilities from the temporal branch. This is optional in the first implementation.
+
 
