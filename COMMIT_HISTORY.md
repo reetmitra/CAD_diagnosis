@@ -1118,6 +1118,56 @@ Comprehensive documentation of all three Phase 17–19 improvements:
 
 ---
 
+## Phase 20 — v13 Training Launch & Combined Confusion Matrix {#phase-20}
+
+### v13 Pre-training | 2026-04-16 | *Launch v13 pre-training (SE gates + parallel streams)*
+**Files changed:** `logs_pretrain_v13.log` (generated)
+
+v13 pre-training launched on 2× RTX 3090 from scratch using `configs/pretrain_v13.yaml`. Key new components active for the first time:
+- Truly parallel 2D/3D feature streams (Phase 17 fix)
+- Per-level SE attention fusion gates (~220K new parameters, Phase 18)
+- DC temperature annealing from 3.0 → 1.0 over the ramp window (Phase 19)
+
+Training ran for 110 epochs before being intentionally stopped. At epoch 106 validation showed Stenosis F1=0.773 and DC weight fully ramped to 1.0 — the backbone had converged to a strong feature representation. Continuing to the planned 300 epochs was unnecessary; the SE gates had a full curriculum and both branches were producing reliable soft pseudo-labels.
+
+**Checkpoint saved:** `checkpoints_v13/best_model.pth`
+
+---
+
+### v13 Fine-tuning | 2026-04-16 | *Launch v13 fine-tuning from epoch-110 backbone*
+**Files changed:** `logs_finetune_v13.log` (generated)
+
+Fine-tuning launched immediately from `checkpoints_v13/best_model.pth` using `configs/finetune_v13.yaml`. All v12 improvements retained (1D IoU, F1 checkpoint metric, T0=60, boost_nonsig, ordinal EMD, focal loss, balanced sampling, soft DC). New in v13:
+- `lr=2.5e-5` (vs 3.0e-5) — lower peak LR protects pre-trained SE gate weights
+- `patience=120` (vs 100) — extended runway for fresh gate convergence
+- `swa_start_epoch=100` (vs 80) — gates settle before SWA weight averaging begins
+- `dc_temperature_start=3.0` — soft DC targets during 6-class head re-initialisation
+
+**Expected improvement:** Stenosis F1 0.78–0.85 vs v12's 0.739. Results pending.
+
+---
+
+### `b886cbc` (pre-existing) | 2026-04-16 | *eval: add combined joint confusion matrix (7 classes)*
+**Files changed:** `eval.py` (+75)
+
+Added a 7×7 combined stenosis × plaque confusion matrix to `eval.py` with labels: `bg`, `NS + NonCalc`, `NS + Mix`, `NS + Calc`, `S + NonCalc`, `S + Mix`, `S + Calc`.
+
+**Problem solved:** `all_plaque_gts/preds` are filtered to lesion-only arteries and therefore shorter than `all_stenosis_gts/preds` — they cannot be naively zipped. The fix tracks two parallel per-artery plaque lists (aligned 1:1 with stenosis, `-1` for background) and a `plaque_artery_idx` mapping so that threshold-updated plaque predictions are synced back after calibration is applied.
+
+**New functions:**
+- `_make_combined_label(stenosis, plaque)` — maps `(0/1/2, 0/1/2/-1)` → `0–6`
+- `_build_combined_labels(stenosis_list, plaque_list)` — applies mapping across aligned lists
+- `COMBINED_CLASSES` constant with the 7 label strings
+
+**Output:**
+- `print_results()` now prints the 7×7 matrix to stdout under `--detailed`
+- `generate_plots()` saves `confusion_combined.png` under `--plot`
+- `plot_confusion_matrix()` figure size and font now scale with `n` so the larger matrix renders clearly with rotated x-axis tick labels
+
+**Contribution:** Enables a single-glance view of joint stenosis+plaque prediction quality that was previously only possible by mentally cross-referencing two separate 3×3 matrices.
+
+---
+
 ## Metrics Progression Summary {#metrics-summary}
 
 | Version | Stenosis F1 | Stenosis ACC | Sig Recall | NonSig Recall | Plaque F1 | Key Change |

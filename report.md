@@ -2472,4 +2472,70 @@ python eval.py \
 
 **Expected Stenosis F1:** 0.78–0.85 (vs v12's 0.739). Biggest contributors: parallel 2D/3D streams (+feature diversity) and DC temperature (+stable early fine-tuning).
 
+---
+
+## Phase 20 — v13 Training Launch & Combined Confusion Matrix (2026-04-16)
+
+### 20.1 v13 Pre-training Run
+
+Pre-training was launched on 2026-04-16 using the v13 config (parallel 2D/3D streams + SE fusion gates + DC temperature annealing). Training ran on 2× RTX 3090 with `torchrun --nproc_per_node=2`. After 110 epochs the model was producing strong pre-training validation metrics:
+
+| Epoch | Stenosis ACC | Stenosis F1 | Plaque ACC | Plaque F1 | DC Weight | LR    |
+| ----- | ------------ | ----------- | ---------- | --------- | --------- | ----- |
+| 106   | 0.808        | 0.773       | 0.545      | 0.462     | 1.0       | 8e-6  |
+
+Pre-training was intentionally stopped at epoch 110 rather than running the full 300 epochs. The Stenosis F1 of 0.773 on the 3-class pre-training task (validated on plaque composition labels with DC fully active at weight=1.0) indicated the backbone had converged to a strong feature representation. The `checkpoints_v13/best_model.pth` checkpoint was used to launch fine-tuning immediately.
+
+**Rationale for early stop:** The SE gate parameters had already had 110 full epochs to learn content-dependent 3D/2D weighting. DC loss was fully ramped (weight=1.0) and both branches were producing reliable pseudo-labels. Continuing to epoch 300 would yield diminishing returns on the pre-training task while the fine-tuning task (stenosis severity classification) is what matters for evaluation.
+
+### 20.2 v13 Fine-tuning Launch
+
+Fine-tuning was launched immediately from `checkpoints_v13/best_model.pth` using `configs/finetune_v13.yaml`:
+
+```bash
+torchrun --nproc_per_node=2 --master_port=29506 train.py --distributed \
+  --config configs/finetune_v13.yaml \
+  --pretrained ./checkpoints_v13/best_model.pth
+```
+
+Log: `logs_finetune_v13.log`. Checkpoints: `checkpoints_v13_finetune/`.
+
+Key differences from v12 fine-tuning:
+
+- **lr=2.5e-5** (vs 3.0e-5) — protects pre-trained SE gate weights from overshooting
+- **patience=120** (vs 100) — fresh gate parameters need more runway
+- **swa_start_epoch=100** (vs 80) — lets gates settle before weight averaging
+- **dc_temperature_start=3.0** — prevents noisy 6-class pseudo-labels during head re-initialisation
+- **Parallel 2D/3D streams active** — fix from Phase 17 is baked into the v13 backbone
+
+Expected Stenosis F1: 0.78–0.85. Results pending.
+
+### 20.3 Combined Joint Confusion Matrix (eval.py)
+
+Added a new 7-class combined confusion matrix to `eval.py` that shows stenosis severity × plaque composition jointly. This gives a single view of the full 6-class prediction space plus background that was previously only visible by cross-referencing two separate 3×3 matrices.
+
+**Labels:**
+
+| Index | Label          | Stenosis        | Plaque         |
+| ----- | -------------- | --------------- | -------------- |
+| 0     | `bg`           | Healthy         | —              |
+| 1     | `NS + NonCalc` | Non-significant | Non-calcified  |
+| 2     | `NS + Mix`     | Non-significant | Mixed          |
+| 3     | `NS + Calc`    | Non-significant | Calcified      |
+| 4     | `S + NonCalc`  | Significant     | Non-calcified  |
+| 5     | `S + Mix`      | Significant     | Mixed          |
+| 6     | `S + Calc`     | Significant     | Calcified      |
+
+**Implementation approach:**
+
+The key challenge was that `all_plaque_gts/preds` in `evaluate()` are filtered to lesion-only arteries (length < N), while `all_stenosis_gts/preds` cover all N arteries. These cannot simply be zipped. The solution:
+
+1. **New per-artery lists** (`all_artery_plaque_gts`, `all_artery_plaque_preds`) — collected 1:1 alongside the stenosis lists, with `-1` for healthy/background arteries.
+2. **Index tracking** (`plaque_artery_idx`) — records which artery index each lesion-only entry maps to, so threshold-updated `all_plaque_preds` can be synced back after the eval loop.
+3. **Threshold sync** — after calibration thresholds mutate `all_plaque_preds`, those updates are written back into `all_artery_plaque_preds` via `plaque_artery_idx`.
+4. **`_make_combined_label(stenosis, plaque)`** — maps any `(stenosis, plaque)` pair to 0–6. Undetected plaque (`-1`) defaults to Calcified.
+5. **`_build_combined_labels()`** — applies the mapping across the aligned lists.
+
+The combined matrix is printed in `--detailed` mode and saved as `confusion_combined.png` by `--plot`. The existing 3×3 stenosis and plaque matrices are unchanged. Figure size in `plot_confusion_matrix` now scales with `n` so the 7×7 matrix renders clearly with rotated x-axis labels.
+
 

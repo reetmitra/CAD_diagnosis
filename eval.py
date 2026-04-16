@@ -36,6 +36,51 @@ from config import opt
 # Class name constants
 STENOSIS_CLASSES = ["Healthy", "Non-significant", "Significant"]
 PLAQUE_CLASSES = ["Calcified", "Non-calcified", "Mixed"]
+# Combined joint label: stenosis severity × plaque composition (7 classes)
+# Index 0 = background (healthy, no plaque).
+# Indices 1-6 = NS/S × NonCalc/Mix/Calc in the order requested by the user.
+COMBINED_CLASSES = ["bg",
+                    "NS + NonCalc", "NS + Mix", "NS + Calc",
+                    "S + NonCalc",  "S + Mix",  "S + Calc"]
+
+
+def _make_combined_label(stenosis: int, plaque: int) -> int:
+    """Map (stenosis_class, plaque_class) → combined index 0-6.
+
+    stenosis: 0=Healthy, 1=Non-significant, 2=Significant
+    plaque:   0=Calcified, 1=Non-calcified, 2=Mixed, -1=not detected (→ Calcified)
+
+    Combined index:
+      0 → bg           (stenosis 0)
+      1 → NS + NonCalc (stenosis 1, plaque 1)
+      2 → NS + Mix     (stenosis 1, plaque 2)
+      3 → NS + Calc    (stenosis 1, plaque 0 or -1)
+      4 → S  + NonCalc (stenosis 2, plaque 1)
+      5 → S  + Mix     (stenosis 2, plaque 2)
+      6 → S  + Calc    (stenosis 2, plaque 0 or -1)
+    """
+    if stenosis == 0:
+        return 0
+    # Default undetected plaque to Calcified (index 0)
+    p = plaque if plaque != -1 else 0
+    if stenosis == 1:
+        # NS: NonCalc→1, Mix→2, Calc→3
+        return {0: 3, 1: 1, 2: 2}.get(p, 3)
+    # Significant: NonCalc→4, Mix→5, Calc→6
+    return {0: 6, 1: 4, 2: 5}.get(p, 6)
+
+
+def _build_combined_labels(stenosis_list, plaque_list):
+    """Zip per-artery stenosis and plaque lists into combined label lists.
+
+    Args:
+        stenosis_list: list of int (0/1/2) — one entry per artery
+        plaque_list:   list of int (0/1/2/-1) — one entry per artery, -1 for bg
+
+    Returns:
+        (combined_gts, combined_preds) — both are lists of int 0-6
+    """
+    return [_make_combined_label(s, p) for s, p in zip(stenosis_list, plaque_list)]
 
 
 def parse_args():
@@ -754,6 +799,15 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
     all_stenosis_probs = [] if collect_probs else None
     all_plaque_probs = [] if collect_probs else None
 
+    # Per-artery plaque tracking (aligned 1:1 with all_stenosis_gts/preds).
+    # -1 means no plaque (background or undetected).  Used to build the
+    # combined joint confusion matrix after threshold application.
+    all_artery_plaque_gts = []
+    all_artery_plaque_preds = []
+    # Maps each entry in all_plaque_preds/gts → its artery index in
+    # all_stenosis_gts, so threshold-updated preds can be synced back.
+    plaque_artery_idx = []
+
     # Sampling point classification tracking
     sc_correct = 0
     sc_total = 0
@@ -784,6 +838,10 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
                 all_stenosis_preds.append(stenosis_pred)
                 all_stenosis_gts.append(stenosis_gt)
 
+                # Per-artery plaque tracking (aligned to stenosis lists)
+                all_artery_plaque_gts.append(plaque_gt)
+                all_artery_plaque_preds.append(plaque_pred)
+
                 # Collect softmax probabilities for AUC-ROC / thresholds
                 if collect_probs:
                     _collect_artery_probs(
@@ -794,6 +852,7 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
                     effective_plaque_pred = plaque_pred if plaque_pred != -1 else num_classes
                     all_plaque_preds.append(effective_plaque_pred)
                     all_plaque_gts.append(plaque_gt)
+                    plaque_artery_idx.append(len(all_stenosis_gts) - 1)
 
                 # SC branch
                 if eval_sc and sc_out_i is not None and 'pred_logits' in sc_out_i:
@@ -822,6 +881,10 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
                 all_stenosis_preds.append(stenosis_pred)
                 all_stenosis_gts.append(stenosis_gt)
 
+                # Per-artery plaque tracking (aligned to stenosis lists)
+                all_artery_plaque_gts.append(plaque_gt)
+                all_artery_plaque_preds.append(plaque_pred)
+
                 # Collect softmax probabilities for AUC-ROC / thresholds
                 if collect_probs:
                     _collect_artery_probs(
@@ -832,6 +895,7 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
                     effective_plaque_pred = plaque_pred if plaque_pred != -1 else num_classes
                     all_plaque_preds.append(effective_plaque_pred)
                     all_plaque_gts.append(plaque_gt)
+                    plaque_artery_idx.append(len(all_stenosis_gts) - 1)
                 elif plaque_pred != -1 and plaque_gt == -1:
                     pass
 
@@ -900,6 +964,13 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
             print("Warning: No sampling points evaluated (sc_total=0).")
             sc_metrics = {'acc': 0.0, 'total_points': 0, 'correct_points': 0}
 
+    # Sync per-artery plaque preds with any threshold-updated all_plaque_preds.
+    # After threshold application all_plaque_preds values are in {0,1,2};
+    # without thresholds they may contain the dummy num_classes value (→ -1).
+    for list_idx, artery_idx in enumerate(plaque_artery_idx):
+        raw_pred = all_plaque_preds[list_idx]
+        all_artery_plaque_preds[artery_idx] = raw_pred if raw_pred < 3 else -1
+
     # Build detailed data dict if requested
     detailed_data = None
     if detailed:
@@ -910,6 +981,10 @@ def evaluate(model, test_loader, device, num_classes, eval_sc=False,
             'plaque_gts': all_plaque_gts,
             'plaque_preds': all_plaque_preds,
             'plaque_probs': all_plaque_probs,
+            # Per-artery plaque lists (aligned 1:1 with stenosis lists).
+            # Used for the combined joint confusion matrix.
+            'artery_plaque_gts': all_artery_plaque_gts,
+            'artery_plaque_preds': all_artery_plaque_preds,
         }
 
     return stenosis_metrics, plaque_metrics, sc_metrics, detailed_data
@@ -973,6 +1048,19 @@ def print_results(stenosis_metrics, plaque_metrics, sc_metrics=None,
         print_confusion_matrix(
             detailed_data['plaque_gts'], detailed_data['plaque_preds'],
             PLAQUE_CLASSES)
+
+    # Combined joint confusion matrix (stenosis × plaque, 7 classes)
+    if (detailed_data is not None
+            and 'artery_plaque_gts' in detailed_data
+            and len(detailed_data['artery_plaque_gts']) > 0):
+        print()
+        print("Combined Joint Classification (Stenosis × Plaque — 7 classes):")
+        print("  Confusion Matrix (rows=GT, cols=Pred):")
+        combined_gts = _build_combined_labels(
+            detailed_data['stenosis_gts'], detailed_data['artery_plaque_gts'])
+        combined_preds = _build_combined_labels(
+            detailed_data['stenosis_preds'], detailed_data['artery_plaque_preds'])
+        print_confusion_matrix(combined_gts, combined_preds, COMBINED_CLASSES)
 
     if sc_metrics is not None:
         print()
@@ -1429,15 +1517,20 @@ def plot_confusion_matrix(matrix, class_names, title, save_path):
     # Avoid division by zero
     pct_matrix = np.where(row_sums > 0, matrix / row_sums * 100.0, 0.0)
 
-    fig, ax = plt.subplots(figsize=(6, 5))
+    # Scale figure size with number of classes so labels always fit
+    cell_size = max(1.0, 6.0 / max(n, 3))
+    fig_w = max(6, n * cell_size + 1.5)
+    fig_h = max(5, n * cell_size + 1.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     im = ax.imshow(matrix, interpolation='nearest', cmap='Blues')
     ax.set_title(title, fontsize=13, pad=12)
 
-    # Tick labels
+    # Tick labels — rotate x-axis labels for longer names
+    label_fontsize = max(7, 10 - max(0, n - 4))
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
-    ax.set_xticklabels(class_names, fontsize=10)
-    ax.set_yticklabels(class_names, fontsize=10)
+    ax.set_xticklabels(class_names, fontsize=label_fontsize, rotation=45, ha='right')
+    ax.set_yticklabels(class_names, fontsize=label_fontsize)
     ax.set_xlabel('Predicted', fontsize=11)
     ax.set_ylabel('True', fontsize=11)
 
@@ -1603,6 +1696,26 @@ def generate_plots(detailed_data, plot_dir):
             saved_paths.append(path)
     except Exception as e:
         print(f"Warning: Failed to plot plaque confusion matrix: {e}")
+
+    # --- Combined joint confusion matrix (7 classes) ---
+    try:
+        if ('artery_plaque_gts' in detailed_data
+                and len(detailed_data['artery_plaque_gts']) > 0):
+            combined_gts = _build_combined_labels(
+                detailed_data['stenosis_gts'], detailed_data['artery_plaque_gts'])
+            combined_preds = _build_combined_labels(
+                detailed_data['stenosis_preds'], detailed_data['artery_plaque_preds'])
+            n = len(COMBINED_CLASSES)
+            cm = [[0] * n for _ in range(n)]
+            for gt, pred in zip(combined_gts, combined_preds):
+                if 0 <= gt < n and 0 <= pred < n:
+                    cm[gt][pred] += 1
+            path = os.path.join(plot_dir, 'confusion_combined.png')
+            plot_confusion_matrix(cm, COMBINED_CLASSES,
+                                  'Combined (Stenosis × Plaque) - Confusion Matrix', path)
+            saved_paths.append(path)
+    except Exception as e:
+        print(f"Warning: Failed to plot combined confusion matrix: {e}")
 
     # --- Stenosis per-class metrics ---
     try:
