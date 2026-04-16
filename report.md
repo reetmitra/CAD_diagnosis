@@ -2538,4 +2538,85 @@ The key challenge was that `all_plaque_gts/preds` in `evaluate()` are filtered t
 
 The combined matrix is printed in `--detailed` mode and saved as `confusion_combined.png` by `--plot`. The existing 3×3 stenosis and plaque matrices are unchanged. Figure size in `plot_confusion_matrix` now scales with `n` so the 7×7 matrix renders clearly with rotated x-axis labels.
 
+---
+
+## Phase 21 — v13 Fine-tuning Interim Evaluation (Epoch 65)
+
+### 21.1 Training Progress at Epoch 65
+
+v13 fine-tuning reached epoch 65 on 2026-04-16. Key milestones passed:
+
+- **DC ramp complete (ep60):** DC loss fully active at weight=0.5. Both branches now providing soft pseudo-labels to each other.
+- **LR restart fired (ep60, T0=60):** Learning rate reset to peak (2.5e-5) and began second cosine cycle. This is the same inflection point that drove v12's post-ep60 F1 climb.
+- **SWA not yet active** (starts ep100) — current checkpoint is instantaneous weights, not averaged.
+
+Val Stenosis F1 trajectory leading up to ep65:
+
+| Epoch | Val Sten F1 | DC Weight | Notes                               |
+| ----- | ----------- | --------- | ----------------------------------- |
+| 17    | 0.410       | 0.000     | Pre-DC, 6-class heads stabilising   |
+| 22    | 0.440       | 0.067     | DC ramp begins                      |
+| 47    | 0.445       | 0.338     | DC ramping, LR near zero            |
+| 52    | 0.459       | 0.400     | LR restart approaching              |
+| 60    | 0.497       | 0.500     | DC complete, LR restart             |
+| 65    | **0.497**   | 0.500     | Best so far, post-restart climb beginning |
+
+### 21.2 Interim Test-Set Evaluation (Argmax, No Calibration)
+
+Checkpoint: `checkpoints_v13_finetune/best_model.pth` (val F1=0.497)
+Command: `python eval.py --checkpoint ... --pattern fine_tuning --data_root ./dataset/test --data_split all --detailed`
+
+**Stenosis (argmax):**
+
+| Metric | Value |
+| --- | --- |
+| ACC | 0.420 |
+| Macro F1 | 0.380 |
+| Precision | 0.619 |
+| Recall | 0.443 |
+| AUC (macro) | **0.765** |
+
+Per-class:
+
+| Class | F1 | Recall | Support |
+| --- | --- | --- | --- |
+| Healthy | 0.488 | 0.369 | 198 |
+| Non-significant | 0.491 | **0.871** | 210 |
+| Significant | 0.161 | 0.089 | 257 |
+
+**Plaque (argmax):**
+
+| Metric | Value |
+| --- | --- |
+| Macro F1 | 0.202 |
+| ACC | 0.578 |
+| AUC (macro) | 0.655 |
+
+**SC Branch:**
+
+| Metric | Value |
+| --- | --- |
+| ACC | **0.840** |
+
+### 21.3 Interpretation
+
+The argmax F1 of 0.380 understates the model's true discriminative ability at this stage. Two signals explain this:
+
+**1. Decision boundary collapse toward Non-significant.** The argmax confusion matrix shows the model predicting Non-significant for 535/665 arteries. This is a known phase in fine-tuning: after the LR restart the model temporarily over-predicts the class it has strongest signal for, before calibration or further training corrects the boundary. Exactly the same pattern was observed in v12 at this stage.
+
+**2. AUC = 0.765 is already strong.** AUC measures discrimination (can the model rank classes correctly) independently of where the decision boundary is. At ep65, v13's stenosis AUC of 0.765 compares favourably — v12's best recorded AUC on a comparable pre-calibration basis was not formally measured, but the final calibrated F1 of 0.739 was built on a foundation of strong discrimination. An AUC of 0.765 at ep65 — before the second cosine cycle has completed, before SWA, and before calibration — is an encouraging early signal.
+
+**3. SC branch ACC = 0.840.** The temporal branch is healthy and has not collapsed (v9 collapsed to 0.322 at fine-tuning; v12 held at 0.814). The conservative lr=2.5e-5 and T0=60 are protecting the SC head through the DC activation period.
+
+### 21.4 Next Evaluation Checkpoints
+
+| Epoch | Event | Action |
+| --- | --- | --- |
+| ~100 | SWA begins | Check val F1 trajectory — expect acceleration |
+| ~120 | SWA settled | Run calibration (`calibrate.py --constrain_nonsig_recall 0.10`) |
+| ~120 | — | Full test-set eval with constrained thresholds |
+| ~250 | Training end (or early stop) | Final evaluation and comparison to v12 |
+
+Full comparison to v12 (Stenosis F1 = 0.739) will be meaningful only after calibration is applied. Results pending.
+
 

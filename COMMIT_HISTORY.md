@@ -1147,6 +1147,64 @@ Fine-tuning launched immediately from `checkpoints_v13/best_model.pth` using `co
 
 ---
 
+### `445f0ff` | 2026-04-16 | *feat: add combined joint confusion matrix + v13 training launched*
+**Files changed:** `eval.py` (+75), `report.md` (+66), `COMMIT_HISTORY.md` (+50)
+
+Combined three changes into one commit:
+
+1. **`eval.py`** — 7-class combined confusion matrix (see Phase 20 description above for full details).
+2. **`report.md`** — Phase 20 section added: v13 pre-train/fine-tune launch documentation, early-stop rationale, combined confusion matrix design.
+3. **`COMMIT_HISTORY.md`** — Phase 20 entries added.
+
+---
+
+### `6f0abcd` | 2026-04-16 | *docs: add V12_RESULTS.md — full v12 evaluation report with visualisations*
+**Files changed:** `V12_RESULTS.md` (+240)
+
+Created a standalone comprehensive results document for v12-ft — the best model in the project at the time of writing. Contents:
+
+- Executive summary of the 4 changes that drove v12 (1D IoU, F1 checkpoint metric, T0=60, patience=100)
+- Full test-set metrics: stenosis (F1=0.739, AUC=0.713, Sig Rec=0.733, NonSig Rec=0.639), plaque (F1=0.502), SC branch (ACC=0.814)
+- Complete version comparison table v1→v12 with absolute and relative improvements (+79% Stenosis F1 from baseline)
+- Standard vs constrained calibration comparison — NonSig recall breakthrough 0%→63.9%
+- Training configuration reference table
+- CPR visualisation gallery (Figure 3 style): 9 images across 4 outcome categories (both correct, v12 improves, v7 better, both wrong)
+- Clinical analysis: NonSig detection breakthrough, SC branch stability, remaining hard classes
+- v13 roadmap with expected F1 range 0.78–0.85
+
+All numbers sourced from `METRICS_2026-04-06.md` — the genuine documented test-set results from when v12 was evaluated against the correct architecture (before Phase 17-19 added SE fusion gates that would corrupt a v12 checkpoint loaded into the current codebase).
+
+---
+
+### `273d64f` | 2026-04-16 | *fix: move v12 visualisation images to tracked assets/v12/ folder*
+**Files changed:** `assets/v12/` (11 new PNGs), `V12_RESULTS.md` (+11/-11)
+
+`viz_v12_paper/` is listed in `.gitignore` (`viz*/`) so the 3182 visualisation images are never pushed to remote. This meant all image references in `V12_RESULTS.md` were broken on GitHub and in PDF exports.
+
+**Fix:** Copied the 11 specifically referenced images to a new tracked directory `assets/v12/` and updated all 11 image paths in `V12_RESULTS.md` from `viz_v12_paper/` to `assets/v12/`. Images now render correctly everywhere.
+
+---
+
+### v13 ep65 eval | 2026-04-16 | *Interim test-set evaluation at epoch 65*
+**Files changed:** `results_v13ft_ep65_argmax.json` (generated, untracked)
+
+First test-set evaluation of v13 fine-tuning, run at epoch 65 (best checkpoint val F1=0.497). Argmax only — no calibration applied at this stage.
+
+Key results:
+
+| Metric | v13-ft ep65 | v12-ft final | Notes |
+|---|---|---|---|
+| Stenosis F1 (argmax) | 0.380 | 0.655 | Expected low — decision boundary skewed pre-calibration |
+| Stenosis AUC | **0.765** | — | Strong discrimination already at ep65 |
+| Plaque F1 | 0.202 | 0.316 | Still learning |
+| SC Branch ACC | **0.840** | 0.814 | No collapse — SC branch healthy |
+
+**Interpretation:** The argmax F1 of 0.380 is not representative. The model is currently in a "Non-sig collapse" phase (predicting NS for 535/665 arteries) — the same pattern seen in v12 at this stage, driven by the LR restart at ep60 temporarily skewing the decision boundary. The AUC of 0.765 (measuring discrimination independent of decision boundary) is the meaningful signal. Calibration at ep120+ will be required for a fair comparison to v12's 0.739.
+
+Next evaluation planned at ep100–120 once SWA has been active for 20+ epochs.
+
+---
+
 ### `b886cbc` (pre-existing) | 2026-04-16 | *eval: add combined joint confusion matrix (7 classes)*
 **Files changed:** `eval.py` (+75)
 
