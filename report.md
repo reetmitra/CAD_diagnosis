@@ -2619,4 +2619,42 @@ The argmax F1 of 0.380 understates the model's true discriminative ability at th
 
 Full comparison to v12 (Stenosis F1 = 0.739) will be meaningful only after calibration is applied. Results pending.
 
+---
+
+## Phase 22 — v13 Projected Results
+
+### 22.1 Projections (Constrained Calibration)
+
+Based on the ep65 interim eval (AUC=0.765, SC ACC=0.840) and the trajectory observed in v12 fine-tuning, the following final results are projected once training completes and constrained calibration is applied.
+
+| Metric | v12-ft final | v13-ft projected | Confidence |
+| --- | --- | --- | --- |
+| **Stenosis F1** | 0.739 | **0.76–0.80** | Medium-high |
+| **Stenosis AUC** | ~0.71 | **0.80–0.83** | Medium-high |
+| **Sig Recall** | 0.733 | **0.74–0.78** | Medium |
+| **NonSig Recall** | 0.639 | **0.62–0.68** | Medium |
+| **Plaque F1** | 0.502 | **0.51–0.56** | Medium |
+| **SC Branch ACC** | 0.814 | **0.83–0.85** | High |
+
+### 22.2 Confidence Assessment
+
+**High confidence:**
+- SC branch stays healthy (0.83–0.85). Already at 0.840 at ep65, conservative lr=2.5e-5 and T0=60 have protected it through DC activation. Nothing in remaining training should destabilise it.
+- Stenosis F1 beats v12 (>0.739). The AUC of 0.765 at ep65 — before SWA, before calibration, early in the second cosine cycle — already exceeds v12's implied pre-calibration discrimination level.
+
+**Medium confidence:**
+- Reaching 0.78+. Requires the parallel stream fix to meaningfully improve spatial branch feature diversity. The theory is sound but the dataset is small (~665 test arteries) — the effect size could be modest.
+
+**Uncertain:**
+- The 0.80 upper bound on Stenosis F1. That would be a substantial jump and depends on the SE fusion gates having learned meaningful content-dependent 3D/2D channel routing during 110 epochs of pre-training. Cannot be verified until final eval.
+
+### 22.3 Key Indicator to Watch
+
+The **Stenosis AUC** is the cleanest signal. It measures discrimination independently of calibration threshold placement.
+
+- AUC > 0.80 → parallel stream + SE fusion fix is contributing meaningfully to spatial branch quality
+- AUC ~0.75 → gains are primarily from training stability (temperature annealing, T0=60) rather than architecture
+
+A full eval (calibration + test-set) will be run as soon as training completes. Results will replace these projections.
+
 
