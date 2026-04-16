@@ -161,11 +161,11 @@ Total: 3,182 artery visualisations in `viz_v12_paper/`.
 
 *v12 and v7 both correctly classify as Significant. High-confidence agreement.*
 
-![Both correct — Significant, Patient APNHC00002 D1](viz_v12_paper/APNHC00002_D1__sten_Sig_m1_Sig_CORRECT_m2_Sig_CORRECT.png)
+![Both correct — Significant, Patient APNHC00002 D1](assets/v12/APNHC00002_D1__sten_Sig_m1_Sig_CORRECT_m2_Sig_CORRECT.png)
 
-![Both correct — Significant, Patient APNHC00002 LAD](viz_v12_paper/APNHC00002_LAD__sten_Sig_m1_Sig_CORRECT_m2_Sig_CORRECT.png)
+![Both correct — Significant, Patient APNHC00002 LAD](assets/v12/APNHC00002_LAD__sten_Sig_m1_Sig_CORRECT_m2_Sig_CORRECT.png)
 
-![Both correct — Significant, Patient APNHC00016 D1](viz_v12_paper/APNHC00016_D1__sten_Sig_m1_Sig_CORRECT_m2_Sig_CORRECT.png)
+![Both correct — Significant, Patient APNHC00016 D1](assets/v12/APNHC00016_D1__sten_Sig_m1_Sig_CORRECT_m2_Sig_CORRECT.png)
 
 ### 6.2 v12 Correct, v7 Wrong — Improvements
 
@@ -173,31 +173,31 @@ Total: 3,182 artery visualisations in `viz_v12_paper/`.
 
 **Healthy correctly classified by v12, v7 over-calls Non-significant:**
 
-![v12 improvement — Healthy, Patient APNHC00002 LCX](viz_v12_paper/APNHC00002_LCX__sten_Healthy_m1_Healthy_CORRECT_m2_NonSig_WRONG.png)
+![v12 improvement — Healthy, Patient APNHC00002 LCX](assets/v12/APNHC00002_LCX__sten_Healthy_m1_Healthy_CORRECT_m2_NonSig_WRONG.png)
 
-![v12 improvement — Healthy, Patient APNHC00002 RCA](viz_v12_paper/APNHC00002_RCA__sten_Healthy_m1_Healthy_CORRECT_m2_NonSig_WRONG.png)
+![v12 improvement — Healthy, Patient APNHC00002 RCA](assets/v12/APNHC00002_RCA__sten_Healthy_m1_Healthy_CORRECT_m2_NonSig_WRONG.png)
 
 **Non-significant correctly classified by v12, v7 over-calls Significant:**
 
-![v12 improvement — Non-sig, Patient APNHC00034 D1](viz_v12_paper/APNHC00034_D1__sten_NonSig_m1_NonSig_CORRECT_m2_Sig_WRONG.png)
+![v12 improvement — Non-sig, Patient APNHC00034 D1](assets/v12/APNHC00034_D1__sten_NonSig_m1_NonSig_CORRECT_m2_Sig_WRONG.png)
 
-![v12 improvement — Non-sig, Patient APNHC00035 D2](viz_v12_paper/APNHC00035_D2__sten_NonSig_m1_NonSig_CORRECT_m2_Sig_WRONG.png)
+![v12 improvement — Non-sig, Patient APNHC00035 D2](assets/v12/APNHC00035_D2__sten_NonSig_m1_NonSig_CORRECT_m2_Sig_WRONG.png)
 
 ### 6.3 v7 Correct, v12 Wrong — Regressions
 
 *Cases where v7 is correct but v12 is not. These represent the net losses from the v12 changes — important to review.*
 
-![v7 better — Non-sig, Patient APNHC00029 LCX](viz_v12_paper/APNHC00029_LCX__sten_NonSig_m1_Sig_WRONG_m2_NonSig_CORRECT.png)
+![v7 better — Non-sig, Patient APNHC00029 LCX](assets/v12/APNHC00029_LCX__sten_NonSig_m1_Sig_WRONG_m2_NonSig_CORRECT.png)
 
-![v7 better — Significant, Patient APNHC00029 RCA](viz_v12_paper/APNHC00029_RCA__sten_Sig_m1_NonSig_WRONG_m2_Sig_CORRECT.png)
+![v7 better — Significant, Patient APNHC00029 RCA](assets/v12/APNHC00029_RCA__sten_Sig_m1_NonSig_WRONG_m2_Sig_CORRECT.png)
 
 ### 6.4 Both Wrong — Remaining Hard Cases
 
 *Cases where neither model gets the right answer. These highlight remaining failure modes.*
 
-![Both wrong — Significant, Patient APNHC00029 D1](viz_v12_paper/APNHC00029_D1__sten_Sig_m1_NonSig_WRONG_m2_NonSig_WRONG.png)
+![Both wrong — Significant, Patient APNHC00029 D1](assets/v12/APNHC00029_D1__sten_Sig_m1_NonSig_WRONG_m2_NonSig_WRONG.png)
 
-![Both wrong — Non-sig, Patient APNHC00035 RCA](viz_v12_paper/APNHC00035_RCA__sten_NonSig_m1_Sig_WRONG_m2_Sig_WRONG.png)
+![Both wrong — Non-sig, Patient APNHC00035 RCA](assets/v12/APNHC00035_RCA__sten_NonSig_m1_Sig_WRONG_m2_Sig_WRONG.png)
 
 ---
 
