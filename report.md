@@ -3140,4 +3140,89 @@ for q in d['queries']:
 - The `pred_label_array` should be derived from the same `_od_to_combined_labels()` call used for rendering, not recomputed — ensures the JSON exactly matches the PNG.
 - For the SC branch, a parallel `sc_queries` block can be added using the same pattern, recording the per-cube logits and probabilities from the temporal branch. This is optional in the first implementation.
 
+---
 
+## Phase 26 — GT-Free C⁻¹ with Curriculum Confidence Annealing
+
+### 26.1 Motivation
+
+The dual-task contrastive loss (L_dc) is defined in paper Eq. 7 as:
+
+```text
+L_dc = L_od(C(ŷ_sc), ŷ_od) + L_sc(C⁻¹(ŷ_od), ŷ_sc)
+```
+
+C⁻¹(ŷ_od) is a **pure function of OD predictions** — no ground truth involved. The current implementation of `_get_sampling_point_classification_targets` runs Hungarian matching against GT targets to select candidate query indices first, violating this independence. This phase removes the GT dependency and adds a curriculum confidence annealing schedule for stability.
+
+### 26.2 Core Change
+
+**Replace** `_get_sampling_point_classification_targets` in `optimization.py` with a GT-free version:
+
+1. Softmax all Q OD queries
+2. Filter to foreground queries (predicted class ≠ no-object) above `confidence_threshold`
+3. Per-point winner-takes-all: for each sampling point, the highest-confidence overlapping query assigns the label
+4. Output label space: 0 = background; OD class k → SC label k+1 (same shift as `od2sc_targets`)
+
+**Remove** GT targets from `dual_task_contrastive_loss.forward` (hard-label path). `spatio_temporal_contrast_loss.forward` no longer passes `od_targets` to `self.dc_loss`.
+
+### 26.3 Stability: Curriculum Confidence Annealing
+
+Early in training, OD predicts mostly no-object → near-empty pseudo-labels → unstable SC contrastive signal. Mitigation: start with a high confidence threshold (default 0.7) and anneal it down to `dc_confidence_threshold` (default 0.0) over `dc_warmup_ramp` epochs — reusing the existing DC warmup schedule.
+
+New CLI arg: `--dc_confidence_start` (default 0.7). If no DC warmup is used (hold=ramp=0), the threshold stays at `dc_confidence_threshold` immediately (backward compatible).
+
+Annealing schedule (mirrors `_compute_dc_weight`):
+
+```text
+epoch < hold:               threshold = dc_confidence_start
+hold ≤ epoch < hold+ramp:   threshold = start - progress * (start - floor)
+epoch ≥ hold+ramp:          threshold = dc_confidence_threshold
+```
+
+### 26.4 Files Changed
+
+| File | Change |
+| --- | --- |
+| `optimization.py` | Replace `_get_sampling_point_classification_targets`; add `set_dc_confidence` to `dual_task_contrastive_loss` and `spatio_temporal_contrast_loss`; update both `forward` methods |
+| `train.py` | Add `--dc_confidence_start` arg; add `Trainer._compute_dc_confidence`; call `set_dc_confidence` in `train_one_epoch`; log to TensorBoard and epoch printout |
+| `tests/test_dc_loss.py` | New test file — shape, no-object filtering, confidence threshold, label shift, winner-takes-all, `set_dc_confidence`, forward signature, annealing schedule |
+
+### 26.5 Implementation Plan
+
+Full plan at [`docs/superpowers/plans/2026-04-20-gt-free-dc-loss.md`](docs/superpowers/plans/2026-04-20-gt-free-dc-loss.md)
+
+**Task 1:** Write failing tests for GT-free `_get_sampling_point_classification_targets` → `tests/test_dc_loss.py`
+
+**Task 2:** Implement the new method + update `dual_task_contrastive_loss.forward` signature (`od_targets=None`)
+
+**Task 3:** Write failing tests for `set_dc_confidence` chain and forward no-GT assertion
+
+**Task 4:** Implement `set_dc_confidence` on both loss classes; update `spatio_temporal_contrast_loss.forward` to call `self.dc_loss(od_outputs, sc_outputs)` (no GT)
+
+**Task 5:** Write tests for `_compute_dc_confidence` annealing math (verified standalone)
+
+**Task 6:** Add `--dc_confidence_start`, `_compute_dc_confidence`, and call site in `train_one_epoch`; add TensorBoard scalar `Schedule/dc_confidence`
+
+### 26.6 Example Usage
+
+```bash
+# With DC warmup — confidence gates aggressively early, opens over ramp
+python train.py \
+    --pattern fine_tuning \
+    --pretrained checkpoints_v7_finetune/final_model.pth \
+    --dc_warmup_hold 20 \
+    --dc_warmup_ramp 30 \
+    --dc_confidence_start 0.7 \
+    --dc_confidence_threshold 0.0 \
+    --delta 1.0
+
+# Without DC warmup — threshold stays at floor (backward compatible)
+python train.py --pattern fine_tuning --delta 1.0
+```
+
+### 26.7 Key Design Notes
+
+- The soft-label path (`--soft_dc`) is unchanged: it still accepts `od_targets` as optional kwarg for backward compat
+- Winner-takes-all is deterministic (highest confidence wins); no IoU threshold needed since we resolve per-point, not per-box
+- No changes to `framework.py` — `set_dc_confidence` is called directly on `loss_fn` by the trainer, same pattern as `set_dc_weight` and `set_dc_temperature`
+- `od_targets_dc` deep-copy removed from `spatio_temporal_contrast_loss.forward` (was only needed for GT matching in dc_loss)
