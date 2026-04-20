@@ -2748,15 +2748,113 @@ The AUC improvement confirms the representation is better. The F1 problem is in 
 
 ---
 
-## Phase 24 — Model Output Tracking: Prediction Traceability Plan
+## Phase 24 — Model Output Tracking: Prediction Traceability
 
-Plan prepared: 2026-04-16 | Implementation deferred (requires personal machine)
+Implemented: 2026-04-20 | Commit: `590140e`
 
-### 23.1 Objective
+### 24.1 What Was Built
 
-Add a `--save_predictions` flag to `visualize.py` that writes a structured JSON file for every artery processed. The JSON records every number the model produces — from raw logits through to the per-slice colour values painted in the CPR bar — making every prediction fully traceable and auditable.
+`--save_predictions <dir>` flag added to `visualize.py`. When passed, it writes one JSON file per artery and a batch summary JSONL after the loop. No changes to any other file.
 
-The output should answer: *"for this artery, which query fired, at what confidence, covering which slices, and why did the model call it Significant/Non-sig/Healthy?"*
+**Per-artery JSON schema:**
+
+```json
+{
+  "artery_id": "APNHC00002_LAD",
+  "stenosis_gt": 2,           "stenosis_gt_name": "Significant",
+  "stenosis_pred": 2,         "stenosis_pred_name": "Significant",
+  "plaque_pred": 0,           "plaque_pred_name": "Calcified",
+  "correct": true,
+  "gt_label_array": [0, 0, ..., 4, 4, ...],   // 256 ints, 0-6
+  "pred_label_array": [0, 0, ..., 6, 6, ...], // 256 ints — exactly what CPR bar shows
+  "calibration": {"stenosis_thresholds": [2.20, 1.00, 0.45], "plaque_thresholds": [...]},
+  "queries": [
+    {
+      "query_idx": 0,
+      "raw_logits": [...],        // [7] before calibration
+      "raw_probs": [...],         // [7] softmax of raw logits
+      "cal_probs": [...],         // [7] after threshold scaling
+      "pred_class": 2,            "pred_class_name": "Significant",
+      "confidence": 0.62,         "no_object_prob": 0.11,
+      "cx_norm": 0.512,           "w_norm": 0.180,
+      "x0_px": 104,               "x1_px": 127,
+      "survives_filter": true,    "contributes_to_bar": true
+    }
+    // ... 15 more queries
+  ]
+}
+```
+
+`predictions_summary.jsonl` — one compact line per artery (no per-query detail), for fast aggregate loading.
+
+### 24.2 Key Implementation Details
+
+- `predict_artery()` now clones raw logits **before** the calibration step overwrites `od_outputs['pred_logits']` in-place. Returns 6-tuple: `(stenosis_pred, plaque_pred, od_outputs, raw_logits, raw_probs, cal_probs)`.
+- New module-level `_od_to_combined_labels_static()` mirrors the inner closure in `render_artery()` — ensures `pred_label_array` exactly matches the CPR bar pixels.
+- New `build_prediction_record()` assembles the full dict and is called after `render_artery()`.
+- When no calibration thresholds are supplied, `cal_probs` falls back to `raw_probs` — the function is safe to call in argmax mode.
+- All existing CLI flags and rendering behaviour are unchanged when `--save_predictions` is not passed.
+
+### 24.3 Usage
+
+```bash
+python visualize.py \
+  --data_root ./dataset/test --pattern all \
+  --checkpoint checkpoints_v14_finetune/best_model.pth \
+  --thresholds calibration_thresholds_v14_constrained.json --use_constrained \
+  --output_dir viz_v14 \
+  --save_predictions predictions_v14/
+```
+
+Inspect a single artery:
+```bash
+python -c "
+import json
+with open('predictions_v14/APNHC00002_LAD.json') as f: d = json.load(f)
+print(d['artery_id'], '| GT:', d['stenosis_gt_name'], '| Pred:', d['stenosis_pred_name'])
+for q in d['queries']:
+    if q['survives_filter']:
+        print(f'  Q{q[\"query_idx\"]}: {q[\"pred_class_name\"]} conf={q[\"confidence\"]:.3f} x={q[\"x0_px\"]}..{q[\"x1_px\"]}')
+"
+```
+
+### 24.4 Analyses Now Possible
+
+| Question | How |
+| --- | --- |
+| Which queries fire for True Positives? | Filter `correct=true`, look at `survives_filter` queries |
+| Confidence distribution by GT class | Aggregate `confidence` across surviving queries by `stenosis_gt` |
+| Does calibration flip the argmax? | Compare `raw_probs.argmax` vs `cal_probs.argmax` per query |
+| High-confidence wrong predictions | `correct=false` AND `max_confidence > 0.7` in summary |
+| Per-slice model output | `pred_label_array[i]` — direct colour-to-number mapping |
+
+---
+
+## Phase 25 — v14 Pre-training Launch
+
+Launched: 2026-04-20 | PID 1475583 | Log: `logs_pretrain_v14.log`
+
+### 25.1 Rationale
+
+v13 fine-tuning regressed from v12 (F1 0.577 vs 0.739) because pre-training was stopped at ep110/300. The SE fusion gates and truly-parallel 2D stream are fresh parameters that need a full training curriculum to converge. The architecture on disk is already correct — this run gives it a fair test.
+
+No code changes. No architecture changes. Config: `configs/pretrain_v14.yaml` → `checkpoints_v14/`.
+
+### 25.2 Configuration
+
+Identical to `pretrain_v13.yaml` except:
+
+| Parameter | Value |
+| --- | --- |
+| `checkpoint_dir` | `./checkpoints_v14` |
+| `master_port` | 29506 |
+| `epochs` | 300 (full run — no early stopping) |
+
+All other parameters unchanged: lr=1e-4, T0=80, dc_temperature_start=3.0, EMA=true, 2×GPU DDP.
+
+### 25.3 Next Step
+
+When pre-training completes, fine-tune with `configs/finetune_v13.yaml` pointing at `checkpoints_v14/best_model.pth`, then run calibration + full test-set eval and compare against v12 (Stenosis F1=0.739).
 
 ---
 

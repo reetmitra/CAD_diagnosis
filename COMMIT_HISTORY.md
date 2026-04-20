@@ -1296,6 +1296,32 @@ v13 is a regression on F1 (0.577 vs 0.739) despite stronger AUC (0.773 vs ~0.71)
 
 ---
 
+### `590140e` | 2026-04-20 | *feat: add --save_predictions flag to visualize.py — per-artery prediction JSONs*
+**Files changed:** `visualize.py` (+120 lines)
+
+Implemented Phase 24 — full prediction traceability for every artery inference run.
+
+**Changes:**
+
+- `predict_artery()` now clones raw logits before calibration overwrites them in-place, returns 6-tuple `(stenosis_pred, plaque_pred, od_outputs, raw_logits, raw_probs, cal_probs)`.
+- New module-level `_od_to_combined_labels_static()` — mirrors the inner closure in `render_artery()` so `pred_label_array` exactly matches CPR bar pixels.
+- New `build_prediction_record()` — assembles full JSON-serialisable dict per artery: metadata, GT/pred labels, calibration thresholds, `pred_label_array[256]`, and per-query records with raw logits, calibrated probs, box coords (normalised + pixel), `survives_filter`, `contributes_to_bar`.
+- `main()` — writes `<artery_id>.json` per artery and `predictions_summary.jsonl` (compact one-line-per-artery) after the loop, when `--save_predictions <dir>` is passed.
+- All existing behaviour unchanged when flag is omitted.
+
+**Contribution:** Closes the gap where model numerical outputs (logits, query probabilities, box coordinates) were computed but immediately discarded after rendering. Now every number that informs a prediction is persisted for post-hoc analysis.
+
+---
+
+### `9929b4f` | 2026-04-20 | *feat: add v14 pre-training config — full 300-epoch run, no architecture changes*
+**Files changed:** `configs/pretrain_v14.yaml` (+78)
+
+v13 pre-training was killed at ep110/300. SE fusion gates and the truly-parallel 2D stream need a full 300-epoch curriculum to converge. This config is identical to `pretrain_v13.yaml` except `checkpoint_dir=./checkpoints_v14` and `master_port=29506`. No architecture changes — the code on disk is already correct.
+
+v14 pre-training launched 2026-04-20, PID 1475583, logging to `logs_pretrain_v14.log`.
+
+---
+
 ## Summary of Research Areas Covered
 
 1. **Architecture** — DETR-style object detection, 3D CNN + Transformer, 2D/3D hybrid feature extraction, SE attention gates, learnable positional encoding
