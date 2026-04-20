@@ -1,0 +1,78 @@
+# SC-Net v14 pre-training — identical architecture to v13, full 300-epoch run
+#
+#   The only change from v13 pre-training: this run completes all 300 epochs.
+#   v13 pre-training was killed at ep110/300, leaving the SE fusion gates and
+#   the truly-parallel 2D stream under-converged. That under-convergence was
+#   the root cause of the v13 fine-tuning regression (F1=0.577 vs v12's 0.739).
+#
+#   Architecture on disk is already correct:
+#     - Truly parallel 2D/3D feature streams (x_2d feeds x_2d at levels 1+)
+#     - SE attention fusion gates (_FusionGate) replacing scalar _3d_weight
+#     - Learnable view weights (nn.Parameter) in _2d_extraction_block
+#     - Learnable positional encoding in temporal branch
+#     - batch_first=True TransformerEncoderLayer (no manual transpose)
+#     - Proper spatial_flattening_projection (Conv3d + clean flatten + Linear)
+#
+#   No code changes. No architecture changes. Just let it train.
+#
+# Usage (2x GPU — recommended):
+#   torchrun --nproc_per_node=2 --master_port=29506 train.py --distributed \
+#     --config configs/pretrain_v14.yaml
+#
+# Usage (single GPU):
+#   python train.py --config configs/pretrain_v14.yaml
+
+pattern: pre_training
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 300
+lr: 1.0e-4
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+# LR schedule: cosine warm restarts, T0=80 → two full cycles in 300 epochs
+lr_schedule: cosine_warm_restarts
+lr_t0: 80
+lr_t_mult: 2
+
+# EMA
+ema: true
+ema_decay: 0.999
+
+# DC loss settings (pre-training: delta=1.0, standard ramp)
+delta: 1.0
+dc_warmup_hold: 20
+dc_warmup_ramp: 40
+soft_dc: true
+dc_confidence_threshold: 0.3
+dc_temperature_start: 3.0
+
+# Class imbalance
+sc_class_weight: true
+ordinal_weight: 0.5
+focal_loss: false
+
+# Augmentation (CDA is offline — keep false as per v10)
+augment: false
+amp: true
+layerwise_lr: true
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+num_workers: 8
+seed: 42
+
+# Transformer architecture (must match downstream fine-tuning)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging and checkpoints
+checkpoint_dir: ./checkpoints_v14
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10
