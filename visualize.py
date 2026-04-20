@@ -298,6 +298,9 @@ def predict_artery(model, volume, device, num_classes,
         'pred_boxes':  od_out_raw['pred_boxes'][0],    # [Q, 2]   = [16, 2]
     }
 
+    raw_logits = od_outputs['pred_logits'].clone()   # [Q, C+1] before calibration
+    raw_probs  = F.softmax(raw_logits, dim=-1)
+
     if stenosis_t is not None:
         # Apply per-class threshold scaling: pred = argmax(p_i / t_i)
         logits = od_outputs['pred_logits']               # [Q, C+1]
@@ -307,9 +310,115 @@ def predict_artery(model, volume, device, num_classes,
         t_vec[:3] = torch.tensor(stenosis_t, dtype=torch.float32, device=device)
         scaled_logits = torch.log(probs / t_vec.unsqueeze(0) + 1e-9)
         od_outputs['pred_logits'] = scaled_logits
+        cal_logits = od_outputs['pred_logits']           # [Q, C+1] after calibration
+        cal_probs  = F.softmax(cal_logits, dim=-1)
+    else:
+        cal_logits = od_outputs['pred_logits']
+        cal_probs  = raw_probs
 
     stenosis_pred, plaque_pred = od_predictions_to_artery_level(od_outputs, num_classes)
-    return stenosis_pred, plaque_pred, od_outputs
+    return stenosis_pred, plaque_pred, od_outputs, raw_logits, raw_probs, cal_probs
+
+
+# ─── Prediction record helpers ────────────────────────────────────────────────
+
+def _od_to_combined_labels_static(od_out, n_cls, D, conf_thresh=0.15):
+    """Convert OD outputs to per-slice combined label array (0–6). Module-level version."""
+    out = np.zeros(D, dtype=np.int32)
+    if od_out is None:
+        return out
+    pred_logits = od_out['pred_logits']
+    pred_boxes  = od_out['pred_boxes']
+    probs       = F.softmax(pred_logits, dim=-1)
+    pred_cls    = probs.argmax(dim=-1)
+    for q in range(pred_logits.shape[0]):
+        cls = pred_cls[q].item()
+        if cls >= n_cls:
+            continue
+        fg_prob  = probs[q, cls].item()
+        no_obj_p = probs[q, n_cls].item()
+        if fg_prob <= no_obj_p or fg_prob < conf_thresh:
+            continue
+        cx  = pred_boxes[q, 0].item()
+        w   = pred_boxes[q, 1].item()
+        x0  = int(max(0, (cx - w / 2) * D))
+        x1  = int(min(D, (cx + w / 2) * D))
+        if x1 <= x0:
+            continue
+        raw_lbl = cls + 1
+        out[x0:x1] = np.where(out[x0:x1] < raw_lbl, raw_lbl, out[x0:x1])
+    return out
+
+
+def build_prediction_record(artery_id, labels, stenosis_gt,
+                             stenosis_pred, plaque_pred,
+                             od_outputs, raw_logits, raw_probs, cal_probs,
+                             stenosis_t, plaque_t,
+                             num_classes, D):
+    """Build a JSON-serialisable dict recording all model outputs for one artery."""
+    CLASS_NAMES  = ['Healthy', 'Non-significant', 'Significant']
+    PLAQUE_NAMES = ['Calcified', 'Non-calcified', 'Mixed']
+
+    pred_label_array = _od_to_combined_labels_static(od_outputs, num_classes, D)
+
+    record = {
+        'artery_id': artery_id,
+        'stenosis_gt': int(stenosis_gt),
+        'stenosis_gt_name': CLASS_NAMES[stenosis_gt],
+        'stenosis_pred': int(stenosis_pred) if stenosis_pred is not None else None,
+        'stenosis_pred_name': CLASS_NAMES[stenosis_pred] if stenosis_pred is not None else None,
+        'plaque_pred': int(plaque_pred) if plaque_pred is not None and plaque_pred >= 0 else None,
+        'plaque_pred_name': PLAQUE_NAMES[plaque_pred] if plaque_pred is not None and plaque_pred >= 0 else None,
+        'correct': bool(stenosis_pred == stenosis_gt) if stenosis_pred is not None else None,
+        'gt_label_array': labels.tolist(),
+        'pred_label_array': pred_label_array.tolist(),
+        'calibration': {
+            'stenosis_thresholds': stenosis_t,
+            'plaque_thresholds': plaque_t,
+        },
+        'queries': [],
+    }
+
+    pred_boxes = od_outputs['pred_boxes']   # [Q, 2]
+    Q = raw_logits.shape[0]
+
+    for q in range(Q):
+        rp = raw_probs[q].tolist()
+        cp = cal_probs[q].tolist()
+        cx = pred_boxes[q, 0].item()
+        w  = pred_boxes[q, 1].item()
+        x0_px = int(max(0, (cx - w / 2) * D))
+        x1_px = int(min(D, (cx + w / 2) * D))
+
+        cal_pred_class = int(cal_probs[q].argmax().item())
+        confidence     = float(cal_probs[q, cal_pred_class].item())
+        no_obj_prob    = float(cal_probs[q, num_classes].item())
+        fg_prob        = float(cal_probs[q, cal_pred_class].item())
+
+        survives = (cal_pred_class < num_classes
+                    and fg_prob > no_obj_prob
+                    and fg_prob >= 0.15)
+
+        contributes = survives and (x1_px > x0_px)
+
+        record['queries'].append({
+            'query_idx': q,
+            'raw_logits': raw_logits[q].tolist(),
+            'raw_probs': rp,
+            'cal_probs': cp,
+            'pred_class': cal_pred_class if cal_pred_class < num_classes else None,
+            'pred_class_name': STENOSIS_NAMES[cal_pred_class] if cal_pred_class < num_classes else 'no-object',
+            'confidence': confidence,
+            'no_object_prob': no_obj_prob,
+            'cx_norm': round(cx, 4),
+            'w_norm': round(w, 4),
+            'x0_px': x0_px,
+            'x1_px': x1_px,
+            'survives_filter': survives,
+            'contributes_to_bar': contributes,
+        })
+
+    return record
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -359,6 +468,9 @@ def parse_args():
                         help='Display label for model 2 strip (default: "Model B")')
     parser.add_argument('--iou_threshold', type=float, default=0.3,
                         help='1D IoU threshold for TP/FN/FP classification (default: 0.3)')
+    parser.add_argument('--save_predictions', type=str, default=None,
+                        help='Directory to write per-artery prediction JSON files. '
+                             'If omitted, no JSONs are written.')
     return parser.parse_args()
 
 
@@ -405,6 +517,7 @@ def main():
 
     comparison_mode = model2 is not None
 
+    summary_records = []
     saved = 0
     for vol_path, sten_path, plaq_path, comb_path, artery_id in pairs:
         if args.max_samples > 0 and saved >= args.max_samples:
@@ -413,14 +526,16 @@ def main():
 
         stenosis_pred, plaque_pred = None, None
         od_outputs = None
+        raw_logits = raw_probs = cal_probs = None
         if model is not None:
-            stenosis_pred, plaque_pred, od_outputs = predict_artery(
+            stenosis_pred, plaque_pred, od_outputs, raw_logits, raw_probs, cal_probs = predict_artery(
                 model, vol, device, num_classes, stenosis_t, plaque_t)
 
         stenosis_pred2, plaque_pred2 = None, None
         od_outputs2 = None
+        raw_logits2 = raw_probs2 = cal_probs2 = None
         if model2 is not None:
-            stenosis_pred2, plaque_pred2, od_outputs2 = predict_artery(
+            stenosis_pred2, plaque_pred2, od_outputs2, raw_logits2, raw_probs2, cal_probs2 = predict_artery(
                 model2, vol, device, num_classes2, stenosis_t2, plaque_t2)
 
         sten_gt = _sten_gt_from_labels(labels)
@@ -478,9 +593,39 @@ def main():
         print(f"  [{saved + 1}/{len(pairs)}] {filename}")
         saved += 1
 
+        if args.save_predictions and model is not None and od_outputs is not None:
+            os.makedirs(args.save_predictions, exist_ok=True)
+            record = build_prediction_record(
+                artery_id, labels, sten_gt,
+                stenosis_pred, plaque_pred,
+                od_outputs, raw_logits, raw_probs, cal_probs,
+                stenosis_t, plaque_t, num_classes, D=vol.shape[0]
+            )
+            json_path = os.path.join(args.save_predictions, f'{artery_id}.json')
+            with open(json_path, 'w') as f:
+                json.dump(record, f, indent=2)
+            summary_records.append({
+                'artery_id': record['artery_id'],
+                'stenosis_gt': record['stenosis_gt'],
+                'stenosis_gt_name': record['stenosis_gt_name'],
+                'stenosis_pred': record['stenosis_pred'],
+                'stenosis_pred_name': record['stenosis_pred_name'],
+                'plaque_pred': record['plaque_pred'],
+                'correct': record['correct'],
+                'n_surviving_queries': sum(1 for q in record['queries'] if q['survives_filter']),
+                'max_confidence': max((q['confidence'] for q in record['queries'] if q['survives_filter']), default=0.0),
+            })
+
     print(f"\nDone. Saved {saved} PNGs to '{args.output_dir}'.")
     if model is not None and args.filter in ('correct', 'incorrect'):
         print(f"  Filter '{args.filter}' was active — totals reflect filtered count only.")
+
+    if args.save_predictions and summary_records:
+        summary_path = os.path.join(args.save_predictions, 'predictions_summary.jsonl')
+        with open(summary_path, 'w') as f:
+            for r in summary_records:
+                f.write(json.dumps(r) + '\n')
+        print(f"  Prediction JSONs: {args.save_predictions}/ ({len(summary_records)} files + summary)")
 
 
 def _build_viz_file_pairs(vol_dir, lbl_dir):
