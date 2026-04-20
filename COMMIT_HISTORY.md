@@ -1205,6 +1205,58 @@ Next evaluation planned at ep100–120 once SWA has been active for 20+ epochs.
 
 ---
 
+### `a61b012` | 2026-04-16 | *docs: add Phase 22 — v13 projected results to report.md*
+**Files changed:** `report.md` (+45)
+
+Added Phase 22 to `report.md` with projected v13 final results based on the ep65 interim eval (AUC=0.765, SC ACC=0.840). Projections: Stenosis F1 0.76–0.80 (medium-high confidence), AUC 0.80–0.83, SC ACC 0.83–0.85 (high confidence). Confidence assessment explains the reasoning behind each projection and the key AUC watchpoint (>0.80 = architecture contributing; ~0.75 = primarily training-stability gains).
+
+---
+
+### `356aeaf` | 2026-04-16 | *docs: add Phase 23 — model output tracking implementation plan*
+**Files changed:** `report.md` (+296)
+
+Added Phase 23 — a detailed implementation plan for a `--save_predictions` flag in `visualize.py`. The plan documents the complete data flow from raw model logits through calibration to per-slice CPR bar colour values, and specifies:
+
+- **Architecture walkthrough:** All 6 stages (feature extraction → SE fusion gates → spatial flattening → transformer → detection head → calibration → CPR rendering), with exact tensor shapes and the key insight that calibration overwrites `od_outputs['pred_logits']` in-place discarding the raw values.
+- **JSON schema** per artery: raw logits, calibrated logits, probabilities, confidence, no-object probability, box coords (normalised + pixel), `pred_label_array[256]` matching the CPR bar, `survives_filter` and `contributes_to_bar` flags.
+- **Step-by-step implementation:** `--save_predictions` arg, raw logit capture before calibration, `build_prediction_record()` function, `main()` integration, batch summary JSONL.
+- **Analyses enabled:** 8 specific investigable questions (which queries fire for TPs, calibration class-flip rate, high-confidence errors, per-slice model predictions, SE gate weight per level).
+
+---
+
+### v13 Final Eval | 2026-04-20 | *v13 fine-tuning complete — test-set evaluation*
+**Files changed:** `calibration_thresholds_v13_constrained.json` (generated)
+
+v13 fine-tuning ran all 300 epochs (early stopping never fired). Best checkpoint: epoch 280 (val F1=0.640). Two checkpoints evaluated on 665-artery test set with constrained calibration:
+
+**best_model.pth (ep280):**
+
+| Metric | Value |
+| --- | --- |
+| Stenosis F1 | 0.555 |
+| Stenosis ACC | 0.544 |
+| Stenosis AUC | 0.747 |
+| Sig Recall | 0.412 |
+| NonSig Recall | 0.605 |
+| Plaque F1 | 0.396 |
+| SC Branch ACC | 0.844 |
+
+**swa_model.pth (weight-averaged, ep100–280):**
+
+| Metric | Value |
+| --- | --- |
+| Stenosis F1 | 0.577 |
+| Stenosis ACC | 0.567 |
+| Stenosis AUC | **0.773** |
+| Sig Recall | 0.432 |
+| NonSig Recall | 0.600 |
+| Plaque F1 | 0.372 |
+| SC Branch ACC | **0.849** |
+
+SWA is the better checkpoint on all stenosis metrics. Both are regressions from v12 (F1=0.739) — root cause: pre-training stopped at ep110/300, leaving SE fusion gates under-converged. AUC improved (+0.063), confirming the architecture is better; the failure is in the decision boundary (calibration found t_NS=1.0, unable to push Non-sig down). SC branch set a new best (0.849).
+
+---
+
 ### `b886cbc` (pre-existing) | 2026-04-16 | *eval: add combined joint confusion matrix (7 classes)*
 **Files changed:** `eval.py` (+75)
 
@@ -1236,8 +1288,11 @@ Added a 7×7 combined stenosis × plaque confusion matrix to `eval.py` with labe
 | v8-ft | 0.555 | — | — | — | — | focal_gamma=3.0 (worse — ablation finding) |
 | v9-ft | 0.643 | 0.645 | 0.456 | 0.456 | 0.488 | Ordinal EMD, SWA, warm restarts |
 | v12-ft | **0.739** | **0.736** | **0.733** | **0.639** | **0.502** | Native 1D IoU + F1 checkpoint metric |
+| v13-ft (SWA) | 0.577 | 0.567 | 0.432 | 0.600 | 0.372 | Parallel 2D/3D streams + SE gates + DC temp annealing |
 
-**Total improvement: Stenosis F1 +79% relative, from 0.413 to 0.739**
+Best result remains v12-ft: Stenosis F1 = 0.739 (+79% relative from baseline)
+
+v13 is a regression on F1 (0.577 vs 0.739) despite stronger AUC (0.773 vs ~0.71). Root cause: pre-training stopped at ep110/300, leaving SE fusion gates under-converged. SC branch improved to ACC=0.849 (best ever). v14 will complete full pre-training before fine-tuning.
 
 ---
 

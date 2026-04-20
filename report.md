@@ -2659,7 +2659,96 @@ A full eval (calibration + test-set) will be run as soon as training completes. 
 
 ---
 
-## Phase 23 — Model Output Tracking: Prediction Traceability Plan
+## Phase 23 — v13 Final Results
+
+### 23.1 Training Summary
+
+v13 fine-tuning ran all 300 epochs (early stopping with patience=120 never triggered).
+
+| Parameter | Value |
+| --- | --- |
+| Best checkpoint | `checkpoints_v13_finetune/best_model.pth` (epoch 280) |
+| SWA checkpoint | `checkpoints_v13_finetune/swa_model.pth` |
+| Best val Stenosis F1 | 0.640 |
+| Best val Stenosis ACC | 0.630 |
+| Calibration | `calibration_thresholds_v13_constrained.json` |
+| Constrained thresholds | [H=2.20, NS=1.00, Sig=0.45] |
+| Plaque thresholds | [Calc=0.958, NonCalc=1.513, Mixed=0.781] |
+
+### 23.2 Test-Set Results (Constrained Calibration)
+
+Both the best model (ep280) and the SWA model were evaluated. SWA is the stronger checkpoint on stenosis.
+
+#### Stenosis Degree Classification
+
+| Metric | v12-ft (best) | v13 best_model (ep280) | v13 SWA | Δ (SWA vs v12) |
+| --- | --- | --- | --- | --- |
+| **Macro F1** | **0.739** | 0.555 | 0.577 | **-0.162** |
+| ACC | 0.736 | 0.544 | 0.567 | -0.169 |
+| Precision | 0.743 | 0.606 | 0.623 | -0.120 |
+| Recall | 0.736 | 0.556 | 0.580 | -0.156 |
+| Specificity | 0.867 | 0.776 | 0.787 | -0.080 |
+| **Stenosis AUC** | ~0.71 | 0.747 | **0.773** | **+0.063** |
+
+Per-class (SWA):
+
+| Class | F1 | Recall | Support |
+| --- | --- | --- | --- |
+| Healthy | 0.704 | 0.707 | 198 |
+| Non-significant | 0.474 | 0.600 | 210 |
+| Significant | 0.555 | 0.432 | 257 |
+
+#### Plaque Composition Classification
+
+| Metric | v12-ft | v13 best_model | v13 SWA |
+| --- | --- | --- | --- |
+| **Macro F1** | **0.502** | 0.396 | 0.372 |
+| ACC | 0.650 | 0.610 | 0.619 |
+
+#### SC Branch
+
+| Metric | v12-ft | v13 best_model | v13 SWA |
+| --- | --- | --- | --- |
+| **ACC** | 0.814 | **0.844** | **0.849** |
+
+### 23.3 Projection vs Actual (Phase 22 Comparison)
+
+| Metric | Projected | Actual (SWA) | Assessment |
+| --- | --- | --- | --- |
+| Stenosis F1 | 0.76–0.80 | **0.577** | Miss — significant regression |
+| Stenosis AUC | 0.80–0.83 | 0.773 | Near lower bound |
+| SC Branch ACC | 0.83–0.85 | **0.849** | On target |
+| Sig Recall | 0.74–0.78 | **0.432** | Miss — decision boundary problem |
+
+### 23.4 Root Cause Analysis
+
+**v13 is a regression from v12 on F1 despite higher AUC.** Two signals explain this:
+
+**1. Calibration could not correct the decision boundary.**
+The constrained calibration search found `t_NS = 1.0` — meaning it could not move the Non-significant threshold at all and still satisfy the constraint. The model's Non-sig probability mass dominates: 335/665 arteries (50%) were predicted Non-significant on the best_model (322/665 on SWA). The calibration surface was too flat to separate Non-sig from Significant regardless of threshold.
+
+**2. Pre-training was insufficient for the new gate parameters.**
+v13 pre-training was stopped at ep110 (out of 300 planned). The `_FusionGate` SE attention parameters and the restarted 2D stream are fresh weights — 110 epochs was not enough for them to converge alongside the rest of the model. v12 used v10's full 200-epoch pre-training as its backbone. Weak spatial features from under-trained gates likely caused the OD branch to over-rely on the easiest signal (Non-significant) rather than learning the Sig/NonSig boundary.
+
+**3. AUC improved (+0.063) despite F1 regression.**
+AUC = 0.773 shows the model has stronger rank-ordering ability than v12 — it *can* discriminate classes correctly — but the decision boundary (which class gets argmax) is badly placed. This is a calibration failure, not a representation failure. A more aggressive constrained search (lower `t_NS`, forced Sig recall floor) may recover F1 on the current checkpoint.
+
+**4. SC branch confirmed improved (+0.030–0.035).**
+The temporal branch benefited from the v13 architectural changes. ACC=0.849 is the best ever recorded, above v12's 0.814.
+
+### 23.5 Next Steps — v14
+
+The AUC improvement confirms the representation is better. The F1 problem is in fine-tuning, not architecture. Three targeted fixes for v14:
+
+| Fix | Description | Addresses |
+| --- | --- | --- |
+| Full pre-training (300 ep) | Do not kill pre-training early — let SE gates converge | Under-trained gates |
+| Harder calibration constraint | Add `--constrain_sig_recall 0.40` floor in addition to NonSig constraint | t_NS=1.0 flatness |
+| Boost-sig weighting | Add Significant class weight 2× in fine-tuning CE loss | Sig recall collapse |
+
+---
+
+## Phase 24 — Model Output Tracking: Prediction Traceability Plan
 
 Plan prepared: 2026-04-16 | Implementation deferred (requires personal machine)
 
