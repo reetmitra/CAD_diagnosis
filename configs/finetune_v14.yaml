@@ -1,0 +1,103 @@
+# SC-Net v14 fine-tuning — from v14 pre-trained checkpoint (300 epochs)
+#
+#   Base: v13 fine-tune params (T0=60, patience=120, dc_hold=20, ramp=40,
+#         delta=0.5, SWA@100, 1D IoU, F1 checkpoint, boost_nonsig,
+#         ordinal EMD, soft DC, dc_temperature_start=3.0)
+#
+#   Changes from v13 fine-tuning:
+#
+#   1. Pretrained backbone: v14 (full 300-epoch pre-train vs v13's ~110 epochs)
+#      - SE fusion gates, truly-parallel 2D stream, learnable positional enc
+#        all fully converged this time
+#
+#   2. GT-free C⁻¹ in Ldc (Phase 26):
+#      - dc_confidence_start: 0.7  → high threshold during hold/early ramp
+#      - Anneals linearly to dc_confidence_threshold=0.4 over ramp window
+#      - No ground truth used in the SC direction of Ldc (paper Eq. 7 faithful)
+#
+#   3. lr: 2.0e-5 (slightly lower than v13's 2.5e-5 — backbone is more
+#      converged so needs a gentler peak to avoid disturbing gate weights)
+#
+# Usage (2x GPU — recommended):
+#   torchrun --nproc_per_node=2 --master_port=29507 train.py --distributed \
+#     --config configs/finetune_v14.yaml \
+#     --pretrained ./checkpoints_v14/best_model.pth
+#
+# Usage (single GPU):
+#   python train.py --config configs/finetune_v14.yaml \
+#     --pretrained ./checkpoints_v14/best_model.pth
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule
+epochs: 300
+lr: 2.0e-5
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+# LR schedule: T0=60 matches v13 (peak F1 strategy)
+lr_schedule: cosine_warm_restarts
+lr_t0: 60
+lr_t_mult: 2
+
+# SWA: start at epoch 100
+swa: true
+swa_start_epoch: 100
+
+# DC settings: Phase 26 GT-free C⁻¹ with curriculum confidence annealing
+dc_warmup_hold: 20
+dc_warmup_ramp: 40
+delta: 0.5
+dc_confidence_threshold: 0.4
+dc_confidence_start: 0.7
+soft_dc: true
+
+# DC temperature annealing: 3.0 → 1.0 over the ramp window (epochs 20–60)
+dc_temperature_start: 3.0
+
+# Label smoothing
+label_smoothing: 0.1
+
+# Ordinal loss
+ordinal_weight: 0.5
+
+# Early stopping — patience=120
+patience: 120
+min_delta: 0.001
+
+# Class imbalance handling (same as v13)
+balanced_sampling: true
+sc_class_weight: true
+boost_nonsig: true
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.15
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+
+# Training infrastructure
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 8
+seed: 42
+patient_split: true
+split_seed: 42
+
+# Transformer architecture (must match v14 pre-training)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging
+checkpoint_dir: ./checkpoints_v14_finetune
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10
