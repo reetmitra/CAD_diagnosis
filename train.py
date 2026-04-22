@@ -161,6 +161,10 @@ def parse_args(argv=None):
                         help='Use soft probability pseudo-labels for Ldc (KL-div instead of hard CE)')
     parser.add_argument('--dc_temperature_start', type=float, default=3.0,
                         help='Initial softmax temperature for DC soft pseudo-labels; anneals to 1.0 over dc_warmup_ramp (default: 3.0)')
+    parser.add_argument('--dc_confidence_start', type=float, default=0.7,
+                        help='Initial confidence threshold for GT-free C⁻¹(ŷ_od) pseudo-labels; '
+                             'linearly anneals to --dc_confidence_threshold over dc_warmup_ramp epochs '
+                             '(default: 0.7). Only active when dc_warmup_ramp > 0.')
     parser.add_argument('--label_smoothing', type=float, default=0.0,
                         help='Label smoothing epsilon for SC classification loss (default: 0.0)')
     parser.add_argument('--balanced_sampling', action='store_true',
@@ -605,15 +609,41 @@ class Trainer:
         else:
             return self.args.delta
 
+    def _compute_dc_confidence(self, epoch: int) -> float:
+        """Anneal the GT-free C⁻¹ confidence threshold from dc_confidence_start to floor.
+
+        Mirrors the dc_weight schedule:
+          - During hold: return dc_confidence_start (aggressive filtering)
+          - During ramp: linearly interpolate from start → dc_confidence_threshold
+          - After ramp: return dc_confidence_threshold (floor)
+          - No schedule (hold=ramp=0): return dc_confidence_threshold immediately
+        """
+        hold  = self.args.dc_warmup_hold
+        ramp  = self.args.dc_warmup_ramp
+        start = getattr(self.args, 'dc_confidence_start', 0.7)
+        floor = self.args.dc_confidence_threshold
+
+        if hold == 0 and ramp == 0:
+            return floor
+        if epoch < hold:
+            return start
+        elif ramp > 0 and epoch < hold + ramp:
+            progress = (epoch - hold) / ramp
+            return start - progress * (start - floor)
+        else:
+            return floor
+
     def train_one_epoch(self, epoch):
         """Run one training epoch. Returns (avg_loss, avg_od, avg_sc, avg_dc)."""
         self.model.train()
         if self.train_sampler is not None and hasattr(self.train_sampler, 'set_epoch'):
             self.train_sampler.set_epoch(epoch)
 
-        # Update dc weight for delayed ramp
+        # Update dc weight and confidence threshold for delayed ramp
         dc_weight = self._compute_dc_weight(epoch)
         self.loss_fn.set_dc_weight(dc_weight)
+        dc_confidence = self._compute_dc_confidence(epoch)
+        self.loss_fn.set_dc_confidence(dc_confidence)
 
         # DC temperature annealing: high temperature early (soft targets), anneal to 1.0 by end of ramp
         dc_temp_start = getattr(self.args, 'dc_temperature_start', 3.0)
@@ -857,10 +887,12 @@ class Trainer:
             elapsed = time.time() - epoch_start
 
             if self.is_main:
-                dc_w = self._compute_dc_weight(epoch)
+                dc_w    = self._compute_dc_weight(epoch)
+                dc_conf = self._compute_dc_confidence(epoch)
                 print(f"Epoch [{epoch}/{self.args.epochs}] "
                       f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-                      f"LR: {current_lr:.6f} | DC_w: {dc_w:.3f} | Time: {elapsed:.1f}s")
+                      f"LR: {current_lr:.6f} | DC_w: {dc_w:.3f} | "
+                      f"DC_conf: {dc_conf:.3f} | Time: {elapsed:.1f}s")
 
                 # ---- TensorBoard epoch-level logging ----
                 if self.writer is not None:
@@ -893,6 +925,8 @@ class Trainer:
                                            current_lr, epoch)
                     self.writer.add_scalar('Schedule/dc_weight',
                                            dc_w, epoch)
+                    self.writer.add_scalar('Schedule/dc_confidence',
+                                           dc_conf, epoch)
 
                     # Per-group LRs when layer-wise LR is enabled
                     if self.args.layerwise_lr:
@@ -1001,8 +1035,10 @@ class Trainer:
         print(f"  Augmentation:     {self.args.augment}")
         print(f"  Delta (DC wt):    {self.args.delta}")
         if self.args.dc_warmup_hold > 0 or self.args.dc_warmup_ramp > 0:
+            dc_conf_start = getattr(self.args, 'dc_confidence_start', 0.7)
             print(f"  DC warmup:        hold={self.args.dc_warmup_hold}, "
-                  f"ramp={self.args.dc_warmup_ramp}")
+                  f"ramp={self.args.dc_warmup_ramp}, "
+                  f"conf_start={dc_conf_start:.2f}→{self.args.dc_confidence_threshold:.2f}")
         if self.args.dc_confidence_threshold > 0:
             print(f"  DC confidence:    {self.args.dc_confidence_threshold}")
         if self.args.balanced_sampling:

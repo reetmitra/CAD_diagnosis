@@ -318,6 +318,10 @@ class dual_task_contrastive_loss(nn.Module):
         self.use_soft_labels = use_soft_labels
         self.dc_temperature = dc_temperature
 
+    def set_dc_confidence(self, threshold: float) -> None:
+        """Update the confidence gate applied in GT-free C⁻¹. Called each epoch by Trainer."""
+        self.confidence_threshold = threshold
+
     def set_dc_temperature(self, temperature: float) -> None:
         self.dc_temperature = max(temperature, 1.0)
 
@@ -336,42 +340,59 @@ class dual_task_contrastive_loss(nn.Module):
             ret_sc_targets.append({"labels": labels})
         return sc2od_targets(ret_sc_targets, self.seq_length)
 
-    def _get_sampling_point_classification_targets(self, od_outputs, od_targets):
+    def _get_sampling_point_classification_targets(self, od_outputs):
+        """GT-free C⁻¹(ŷ_od): convert OD predictions → SC sampling-point labels.
 
-        od_outputs = {k: v.clone() for k, v in od_outputs.items()}
-        od_targets = [{k: v.clone() for k, v in t.items()} for t in od_targets]
-        indices = self.matcher(od_outputs, od_targets)
-        selected_indices = [item[0] for item in indices]
+        No ground truth consulted. Softmax all Q queries, keep only foreground
+        queries above self.confidence_threshold, then for each sampling point
+        the highest-confidence overlapping query wins (winner-takes-all).
 
-        ret_od_targets = []
-        for batch_idx, indices in enumerate(selected_indices):
+        Output label space: 0 = background; OD class k → SC label k+1.
+        Matches rounding convention of od2sc_targets (torch.round / clamp).
+        """
+        batch_size = od_outputs["pred_logits"].shape[0]
+        interval = 1.0 / (self.seq_length + 1)
+        sc_targets = []
 
-            logits = od_outputs["pred_logits"][batch_idx]
-            boxes = od_outputs["pred_boxes"][batch_idx]
-            selected_logits = logits[indices]
-            selected_boxes = boxes[indices]  # already [cx, w]
+        for b in range(batch_size):
+            logits = od_outputs["pred_logits"][b]       # (Q, C+1)
+            boxes  = od_outputs["pred_boxes"][b]        # (Q, 2) [cx, w]
 
-            # Confidence gating: only use high-confidence predictions
-            probs = torch.softmax(selected_logits, dim=1)
-            max_probs, pred_classes = torch.max(probs, dim=1)
+            probs = torch.softmax(logits.float(), dim=-1)
+            max_probs, pred_classes = torch.max(probs, dim=-1)  # (Q,)
 
-            # Filter out no-object predictions (class index == num_classes)
-            num_classes = selected_logits.shape[-1] - 1  # last class is no-object
-            is_object = pred_classes < num_classes
+            num_od_classes = logits.shape[-1] - 1       # last dim = no-object
+            is_foreground = pred_classes < num_od_classes
+            is_confident  = max_probs >= self.confidence_threshold
+            mask = is_foreground & is_confident
 
-            # Also filter by confidence threshold
-            if self.confidence_threshold > 0:
-                is_confident = max_probs >= self.confidence_threshold
-                mask = is_object & is_confident
-            else:
-                mask = is_object
+            fg_labels = pred_classes[mask]              # (K,) OD-space 0-indexed
+            fg_boxes  = boxes[mask]                     # (K, 2)
+            fg_confs  = max_probs[mask]                 # (K,)
 
-            filtered_labels = pred_classes[mask]
-            filtered_boxes = selected_boxes[mask]
+            sc_labels   = torch.zeros(self.seq_length, dtype=torch.long,
+                                      device=logits.device)
+            point_confs = torch.zeros(self.seq_length, dtype=torch.float32,
+                                      device=logits.device)
 
-            ret_od_targets.append({"labels": filtered_labels, "boxes": filtered_boxes})
+            for k in range(fg_labels.shape[0]):
+                cx = fg_boxes[k, 0].item()
+                w  = fg_boxes[k, 1].item()
+                x1, x2 = cx - w / 2.0, cx + w / 2.0
+                # Same rounding as od2sc_targets: round(x/interval) then clamp(1..L)-1
+                start = max(0, min(self.seq_length - 1, round(x1 / interval) - 1))
+                end   = max(0, min(self.seq_length - 1, round(x2 / interval) - 1))
+                conf  = fg_confs[k].item()
+                lbl   = fg_labels[k].item() + 1         # shift OD→SC space
 
-        return od2sc_targets(ret_od_targets, self.seq_length)
+                for p in range(start, end + 1):
+                    if conf > point_confs[p].item():
+                        sc_labels[p]   = lbl
+                        point_confs[p] = conf
+
+            sc_targets.append({"labels": sc_labels})
+
+        return sc_targets
 
     def _compute_soft_sc_loss(self, sc_outputs, od_outputs, od_targets):
         """Compute SC contrastive loss using soft probability targets from OD.
@@ -437,22 +458,23 @@ class dual_task_contrastive_loss(nn.Module):
 
         return self.sc_contrastive_loss.loss_soft(sc_flat, soft_flat)
 
-    def forward(self, od_outputs, sc_outputs, od_targets):
+    def forward(self, od_outputs, sc_outputs, od_targets=None):
 
         od_detached = {k: v.detach() for k, v in od_outputs.items()}
         sc_detached = {k: v.detach() for k, v in sc_outputs.items()}
 
-        # OD contrastive: always uses hard labels from SC predictions
+        # OD contrastive: C(ŷ_sc) → pseudo-targets for L_od
         od_con_targets = self._get_object_detection_targets(sc_detached)
         od_loss_values = self.od_contrastive_loss(od_outputs, od_con_targets)
 
-        # SC contrastive: soft or hard labels from OD predictions
-        if self.use_soft_labels:
+        # SC contrastive: C⁻¹(ŷ_od) → pseudo-targets for L_sc (GT-free hard path)
+        # Soft path retains od_targets for backwards compat but is rarely used.
+        if self.use_soft_labels and od_targets is not None:
             sc_loss_values = self._compute_soft_sc_loss(
                 sc_outputs, od_detached, od_targets)
         else:
             sc_con_targets = self._get_sampling_point_classification_targets(
-                od_detached, od_targets)
+                od_detached)
             sc_loss_values = self.sc_contrastive_loss(sc_outputs, sc_con_targets)
 
         return sc_loss_values + od_loss_values
@@ -492,17 +514,21 @@ class spatio_temporal_contrast_loss(nn.Module):
         """Set the current dc loss weight (for delayed ramp scheduling)."""
         self.dc_weight = weight
 
+    def set_dc_confidence(self, threshold: float) -> None:
+        """Delegate to dc_loss — called each epoch by Trainer to anneal the confidence gate."""
+        self.dc_loss.set_dc_confidence(threshold)
+
     def set_dc_temperature(self, temperature: float) -> None:
         self.dc_loss.set_dc_temperature(temperature)
 
     def forward(self, od_outputs, sc_outputs, od_targets):
 
         # Deep copy targets to prevent in-place mutation across loss terms
-        od_targets_dc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         od_targets_od = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         od_targets_sc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
 
-        dc_loss_val = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * self.dc_weight
+        # dc_loss uses GT-free C⁻¹ — no od_targets passed
+        dc_loss_val = self.dc_loss(od_outputs, sc_outputs) * self.dc_weight
         od_loss_val = self.od_loss(od_outputs, od_targets_od)
         sc_loss_val = self.sc_loss(sc_outputs, od2sc_targets(od_targets_sc, self.seq_length))
         total_loss = dc_loss_val + od_loss_val + sc_loss_val
