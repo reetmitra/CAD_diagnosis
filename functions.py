@@ -13,7 +13,6 @@ import torch
 from torch import nn
 from torch import Tensor
 import torch.distributed as dist
-from torchvision.ops.boxes import box_area
 import torchvision
 if version.parse(torchvision.__version__) < version.parse('0.7'):
     from torchvision.ops import _new_empty_tensor
@@ -166,34 +165,6 @@ class HungarianMatcher(nn.Module):
             )
         return indices
 
-
-def box_lastdim_expansion(data):
-
-    if is_empty_tensor(data) == True:
-        # Return empty tensor with correct last dimension (4) to avoid cat mismatches
-        shape = list(data.shape)
-        shape[-1] = 4
-        return torch.zeros(shape, dtype=data.dtype, device=data.device)
-
-    # 1D vessel-axis boxes [cx, w] → [cx, cy=0.5, w, h=1.0]
-    # A lesion interval along the vessel spans the full CPR cross-section height,
-    # so cy is always the centre (0.5) and h is always 1.0.  This gives correct
-    # 1D IoU when later converted to xyxy: [cx-w/2, 0, cx+w/2, 1].
-    cx = data[..., 0:1]
-    w  = data[..., 1:2]
-    cy = torch.full_like(cx, 0.5)
-    h  = torch.ones_like(w)
-    return torch.cat([cx, cy, w, h], dim=-1)
-
-
-def boxes_dimension_expansion(data, dtype='outputs'):
-
-    if dtype == 'outputs':
-        data["pred_boxes"] = box_lastdim_expansion(data["pred_boxes"])
-    if dtype == 'targets':
-        for tmp_data in data:
-            tmp_data["boxes"] = box_lastdim_expansion(tmp_data["boxes"])
-    return data
 
 
 class SmoothedValue(object):
@@ -647,70 +618,3 @@ def generalized_box_1d_iou(boxes1, boxes2):
     return iou - (hull - union) / hull
 
 
-def box_cxcywh_to_xyxy(x):
-    x_c, y_c, w, h = x.unbind(-1)
-    b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
-         (x_c + 0.5 * w), (y_c + 0.5 * h)]
-    return torch.stack(b, dim=-1)
-
-
-def box_xyxy_to_cxcywh(x):
-    x0, y0, x1, y1 = x.unbind(-1)
-    b = [(x0 + x1) / 2, (y0 + y1) / 2,
-         (x1 - x0), (y1 - y0)]
-    return torch.stack(b, dim=-1)
-
-
-def box_iou(boxes1, boxes2):
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
-
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])
-
-    wh = (rb - lt).clamp(min=0)
-    inter = wh[:, :, 0] * wh[:, :, 1]
-
-    union = area1[:, None] + area2 - inter
-
-    iou = inter / union
-    return iou, union
-
-
-def generalized_box_iou(boxes1, boxes2):
-
-    # Clamp degenerate boxes (can arise from pseudo-targets in contrastive loss)
-    # Use cat instead of in-place assignment to avoid autograd conflicts
-    boxes1 = torch.cat([boxes1[:, :2], torch.max(boxes1[:, 2:], boxes1[:, :2])], dim=-1)
-    boxes2 = torch.cat([boxes2[:, :2], torch.max(boxes2[:, 2:], boxes2[:, :2])], dim=-1)
-    iou, union = box_iou(boxes1, boxes2)
-
-    lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-    rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-
-    wh = (rb - lt).clamp(min=0)
-    area = wh[:, :, 0] * wh[:, :, 1]
-
-    return iou - (area - union) / area
-
-
-def masks_to_boxes(masks):
-
-    if masks.numel() == 0:
-        return torch.zeros((0, 4), device=masks.device)
-
-    h, w = masks.shape[-2:]
-
-    y = torch.arange(0, h, dtype=torch.float)
-    x = torch.arange(0, w, dtype=torch.float)
-    y, x = torch.meshgrid(y, x)
-
-    x_mask = (masks * x.unsqueeze(0))
-    x_max = x_mask.flatten(1).max(-1)[0]
-    x_min = x_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
-
-    y_mask = (masks * y.unsqueeze(0))
-    y_max = y_mask.flatten(1).max(-1)[0]
-    y_min = y_mask.masked_fill(~(masks.bool()), 1e8).flatten(1).min(-1)[0]
-
-    return torch.stack([x_min, y_min, x_max, y_max], 1)

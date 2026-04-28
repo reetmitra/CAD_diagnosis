@@ -157,10 +157,6 @@ def parse_args(argv=None):
                              'after the hold period (default: 0)')
     parser.add_argument('--dc_confidence_threshold', type=float, default=0.0,
                         help='Min softmax confidence for Ldc pseudo-labels (default: 0.0 = no gating)')
-    parser.add_argument('--soft_dc', action='store_true', default=False,
-                        help='Use soft probability pseudo-labels for Ldc (KL-div instead of hard CE)')
-    parser.add_argument('--dc_temperature_start', type=float, default=3.0,
-                        help='Initial softmax temperature for DC soft pseudo-labels; anneals to 1.0 over dc_warmup_ramp (default: 3.0)')
     parser.add_argument('--dc_confidence_start', type=float, default=0.7,
                         help='Initial confidence threshold for GT-free C⁻¹(ŷ_od) pseudo-labels; '
                              'linearly anneals to --dc_confidence_threshold over dc_warmup_ramp epochs '
@@ -348,7 +344,6 @@ class Trainer:
             dc_confidence_threshold=self.args.dc_confidence_threshold,
             eos_coef=self.args.eos_coef,
             label_smoothing=self.args.label_smoothing,
-            use_soft_dc=self.args.soft_dc,
             patient_split=self.args.patient_split,
             split_seed=self.args.split_seed,
             temporal_encoder_layers=getattr(self.args, 'temporal_encoder_layers', None),
@@ -644,17 +639,6 @@ class Trainer:
         self.loss_fn.set_dc_weight(dc_weight)
         dc_confidence = self._compute_dc_confidence(epoch)
         self.loss_fn.set_dc_confidence(dc_confidence)
-
-        # DC temperature annealing: high temperature early (soft targets), anneal to 1.0 by end of ramp
-        dc_temp_start = getattr(self.args, 'dc_temperature_start', 3.0)
-        hold = getattr(self.args, 'dc_warmup_hold', 0)
-        ramp = getattr(self.args, 'dc_warmup_ramp', 0)
-        if ramp > 0 and epoch < hold + ramp:
-            frac = max(0.0, (epoch - hold) / ramp)   # 0→1 during ramp
-            dc_temp = dc_temp_start - frac * (dc_temp_start - 1.0)
-        else:
-            dc_temp = 1.0
-        self.loss_fn.set_dc_temperature(dc_temp)
 
         total_loss = 0.0
         total_od = 0.0

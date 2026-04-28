@@ -1,0 +1,98 @@
+# SC-Net v15 fine-tuning — v14 backbone + v12 recipe + GT-based DC OD→SC direction
+#
+# Root cause of v14 regression (F1=0.654 vs v12's 0.739):
+#   Phase 26's GT-free C⁻¹(ŷ_od) created a self-reinforcing feedback loop:
+#     OD confused about healthy arteries → Non-sig SC pseudo-labels →
+#     SC learns Non-sig for healthy → SC→OD DC reinforces Non-sig in OD →
+#     eos_coef=0.15 too weak to correct → Healthy class collapses to 0% recall.
+#
+# Fix (applied in optimization.py):
+#   spatio_temporal_contrast_loss now passes od_targets to dc_loss.
+#   dual_task_contrastive_loss uses od2sc_targets(GT) for OD→SC pseudo-labels,
+#   matching paper code behaviour and eliminating the feedback loop.
+#   SC→OD direction remains prediction-based (C(ŷ_sc)) as per paper Eq. 7.
+#
+# v15 = v14 backbone (300-epoch, SE fusion gates, parallel 2D/3D streams,
+#        learnable positional encoding, all fully converged) + v12 hyperparameters
+#        (every value proven to yield F1=0.739).
+#
+# Expected: Stenosis F1 ≥ 0.739, Plaque F1 ≥ 0.640 (v14 backbone advantage retained)
+#
+# Usage (2x GPU — recommended):
+#   torchrun --nproc_per_node=2 --master_port=29508 train.py --distributed \
+#     --config configs/finetune_v15.yaml \
+#     --pretrained ./checkpoints_v14/best_model.pth
+#
+# Usage (single GPU):
+#   python train.py --config configs/finetune_v15.yaml \
+#     --pretrained ./checkpoints_v14/best_model.pth
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule — identical to v12 (proven)
+epochs: 250
+lr: 3.0e-5           # v12 value; v14 used 2.0e-5 which caused overfitting in resumed run
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+# LR schedule: T0=60 prevents LR hitting zero at DC activation (ep20)
+lr_schedule: cosine_warm_restarts
+lr_t0: 60
+lr_t_mult: 2
+
+# SWA: start at epoch 80 (v12 value); v14 used 100 and averaged bad-phase weights
+swa: true
+swa_start_epoch: 80
+
+# DC schedule: hold=20 + ramp=40 proven stable in v12
+# OD→SC now GT-based, so confidence_threshold only gates SC→OD direction
+dc_warmup_hold: 20
+dc_warmup_ramp: 40
+delta: 0.5
+dc_confidence_threshold: 0.4
+dc_confidence_start: 0.7   # anneals SC→OD confidence gate: 0.7 → 0.4 over ramp
+
+# Label smoothing + ordinal penalty — both proven in v12
+label_smoothing: 0.1
+ordinal_weight: 0.5
+
+# Early stopping — patience=100 accounts for ep1 pretrained-backbone F1 spike
+patience: 100
+min_delta: 0.001
+
+# Class imbalance handling — all from v12
+balanced_sampling: true
+sc_class_weight: true
+boost_nonsig: true
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.15       # v12 value; GT-based DC fix removes need to increase this
+
+# Effective batch = 2/GPU × 2 GPUs × 4 accum = 16
+accumulate_steps: 4
+
+# Training infrastructure
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 8
+seed: 42
+patient_split: true
+split_seed: 42
+
+# Transformer architecture (must match v14 pre-training)
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+# Logging
+checkpoint_dir: ./checkpoints_v15_finetune
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10

@@ -21,7 +21,7 @@ class sc_net_framework:
                  use_focal=False, focal_gamma=2.0,
                  dc_confidence_threshold=0.0,
                  eos_coef=None,
-                 label_smoothing=0.0, use_soft_dc=False,
+                 label_smoothing=0.0,
                  patient_split=False, split_seed=42,
                  temporal_encoder_layers=None, temporal_heads=None,
                  spatial_encoder_layers=None, spatial_decoder_layers=None,
@@ -43,7 +43,6 @@ class sc_net_framework:
         self._dc_confidence_threshold = dc_confidence_threshold
         self._eos_coef = eos_coef
         self._label_smoothing = label_smoothing
-        self._use_soft_dc = use_soft_dc
         self._patient_split = patient_split
         self._split_seed = split_seed
 
@@ -88,7 +87,6 @@ class sc_net_framework:
                                                dc_confidence_threshold=self._dc_confidence_threshold,
                                                eos_coef=self._eos_coef,
                                                label_smoothing=self._label_smoothing,
-                                               use_soft_dc=self._use_soft_dc,
                                                ordinal_weight=self._ordinal_weight)
             self.dataLoader_train, self.dataLoader_eval, self.dataLoader_test = self.get_dataloader()
 
@@ -137,7 +135,7 @@ class sc_net_framework:
                     use_focal=False, focal_gamma=2.0,
                     dc_confidence_threshold=0.0,
                     eos_coef=None,
-                    label_smoothing=0.0, use_soft_dc=False,
+                    label_smoothing=0.0,
                     ordinal_weight=0.0):
         effective_eos = eos_coef if eos_coef is not None else opt.data_params["eos_coef"]
         return opt_fn.spatio_temporal_contrast_loss(
@@ -150,7 +148,6 @@ class sc_net_framework:
             focal_gamma=focal_gamma,
             dc_confidence_threshold=dc_confidence_threshold,
             label_smoothing=label_smoothing,
-            use_soft_dc=use_soft_dc,
             ordinal_weight=ordinal_weight,
         )
 

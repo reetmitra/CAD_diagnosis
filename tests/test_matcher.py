@@ -9,7 +9,7 @@ from functions import HungarianMatcher
 def _make_outputs(bs, num_queries, num_classes):
     return {
         "pred_logits": torch.randn(bs, num_queries, num_classes + 1),
-        "pred_boxes":  torch.rand(bs, num_queries, 4),
+        "pred_boxes":  torch.rand(bs, num_queries, 2),  # 1D: [center, width]
     }
 
 
@@ -17,7 +17,7 @@ def _make_targets(sizes, num_classes):
     return [
         {
             "labels": torch.randint(0, num_classes, (n,)),
-            "boxes":  torch.rand(n, 4),
+            "boxes":  torch.rand(n, 2),  # 1D: [center, width]
         }
         for n in sizes
     ]
@@ -54,8 +54,8 @@ def test_matcher_handles_empty_batch():
     matcher = HungarianMatcher()
     outputs = _make_outputs(bs, num_q, C)
     targets = [
-        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 4)},
-        {"labels": torch.tensor([1, 2]), "boxes": torch.rand(2, 4)},
+        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 2)},
+        {"labels": torch.tensor([1, 2]), "boxes": torch.rand(2, 2)},
     ]
     indices = matcher(outputs, targets)
     assert len(indices) == bs
@@ -70,8 +70,8 @@ def test_matcher_all_empty_targets():
     matcher = HungarianMatcher()
     outputs = _make_outputs(bs, num_q, C)
     targets = [
-        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 4)},
-        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 4)},
+        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 2)},
+        {"labels": torch.zeros(0, dtype=torch.long), "boxes": torch.zeros(0, 2)},
     ]
     indices = matcher(outputs, targets)
     assert len(indices) == bs

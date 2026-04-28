@@ -306,8 +306,7 @@ def sc2od_targets(sc_point_data, seq_length):
 
 class dual_task_contrastive_loss(nn.Module):
     def __init__(self, od_contrastive_loss, sc_contrastive_loss, seq_length,
-                 confidence_threshold=0.0, use_soft_labels=False,
-                 dc_temperature: float = 1.0):
+                 confidence_threshold=0.0):
         super().__init__()
 
         self.od_contrastive_loss = od_contrastive_loss
@@ -315,15 +314,10 @@ class dual_task_contrastive_loss(nn.Module):
         self.matcher = self.od_contrastive_loss.matcher
         self.seq_length = seq_length
         self.confidence_threshold = confidence_threshold
-        self.use_soft_labels = use_soft_labels
-        self.dc_temperature = dc_temperature
 
     def set_dc_confidence(self, threshold: float) -> None:
         """Update the confidence gate applied in GT-free C⁻¹. Called each epoch by Trainer."""
         self.confidence_threshold = threshold
-
-    def set_dc_temperature(self, temperature: float) -> None:
-        self.dc_temperature = max(temperature, 1.0)
 
     def _get_object_detection_targets(self, sc_outputs):
 
@@ -394,88 +388,25 @@ class dual_task_contrastive_loss(nn.Module):
 
         return sc_targets
 
-    def _compute_soft_sc_loss(self, sc_outputs, od_outputs, od_targets):
-        """Compute SC contrastive loss using soft probability targets from OD.
-
-        Instead of converting OD predictions to hard point labels, we create
-        soft probability distributions for each sampling point based on OD
-        prediction confidences. Uses KL divergence as the loss.
-        """
-        od_out = {k: v.clone() for k, v in od_outputs.items()}
-        od_tgt = [{k: v.clone() for k, v in t.items()} for t in od_targets]
-        indices = self.matcher(od_out, od_tgt)
-        selected_indices = [item[0] for item in indices]
-
-        batch_size = sc_outputs["pred_logits"].shape[0]
-        num_sc_classes = sc_outputs["pred_logits"].shape[2]  # num_classes + 1 (includes bg)
-
-        # Build soft targets for each point in the sequence
-        soft_targets_list = []
-        for batch_idx, sel_idx in enumerate(selected_indices):
-            logits = od_out["pred_logits"][batch_idx]
-            boxes = od_out["pred_boxes"][batch_idx]
-            selected_logits = logits[sel_idx]
-            selected_boxes = boxes[sel_idx]  # already [cx, w]
-
-            # Start with uniform background distribution
-            soft_target = torch.zeros(self.seq_length, num_sc_classes,
-                                      device=logits.device, dtype=torch.float32)
-            soft_target[:, 0] = 1.0  # default to background
-
-            probs = torch.softmax(selected_logits / self.dc_temperature, dim=1)
-            num_od_classes = selected_logits.shape[-1] - 1
-
-            interval = 1.0 / (self.seq_length + 1)
-            for k in range(selected_boxes.shape[0]):
-                cx, w = selected_boxes[k, 0], selected_boxes[k, 1]
-                x1 = cx - w / 2.0
-                x2 = cx + w / 2.0
-                start = int(torch.clamp(torch.round(x1 / interval), min=1, max=self.seq_length).item()) - 1
-                end = int(torch.clamp(torch.round(x2 / interval), min=1, max=self.seq_length).item()) - 1
-
-                # Get class probabilities (exclude no-object class)
-                class_probs = probs[k, :num_od_classes]  # (num_classes,)
-                no_obj_prob = probs[k, num_od_classes]
-
-                # For each point in the interval, set soft targets
-                for p in range(start, end + 1):
-                    if p < self.seq_length:
-                        # Blend: background gets no_obj_prob, classes get their probs
-                        soft_target[p, 0] = no_obj_prob
-                        soft_target[p, 1:num_od_classes + 1] = class_probs
-
-            # Normalize to valid probability distribution
-            soft_target = soft_target / (soft_target.sum(dim=1, keepdim=True) + 1e-8)
-            soft_targets_list.append(soft_target)
-
-        # Stack and compute KL-div loss
-        soft_targets = torch.stack(soft_targets_list, dim=0)  # (B, L, C)
-        sc_logits = sc_outputs["pred_logits"].to(torch.float32)  # (B, L, C)
-
-        # Reshape for KL-div
-        sc_flat = rearrange(sc_logits, 'b l c -> (b l) c')
-        soft_flat = rearrange(soft_targets, 'b l c -> (b l) c')
-
-        return self.sc_contrastive_loss.loss_soft(sc_flat, soft_flat)
-
     def forward(self, od_outputs, sc_outputs, od_targets=None):
 
         od_detached = {k: v.detach() for k, v in od_outputs.items()}
         sc_detached = {k: v.detach() for k, v in sc_outputs.items()}
 
-        # OD contrastive: C(ŷ_sc) → pseudo-targets for L_od
+        # SC→OD: C(ŷ_sc) — always prediction-based, as per paper Eq. 7
         od_con_targets = self._get_object_detection_targets(sc_detached)
         od_loss_values = self.od_contrastive_loss(od_outputs, od_con_targets)
 
-        # SC contrastive: C⁻¹(ŷ_od) → pseudo-targets for L_sc (GT-free hard path)
-        # Soft path retains od_targets for backwards compat but is rarely used.
-        if self.use_soft_labels and od_targets is not None:
-            sc_loss_values = self._compute_soft_sc_loss(
-                sc_outputs, od_detached, od_targets)
+        # OD→SC: C⁻¹ direction
+        # When GT OD targets are provided (training): use them directly via od2sc_targets.
+        # This prevents the GT-free feedback loop that causes Healthy class collapse when
+        # OD predictions are unreliable early in training. Matches paper code behaviour.
+        # GT-free fallback (od_targets=None): used for inference or ablation only.
+        if od_targets is not None:
+            sc_con_targets = od2sc_targets(od_targets, self.seq_length)
         else:
-            sc_con_targets = self._get_sampling_point_classification_targets(
-                od_detached)
-            sc_loss_values = self.sc_contrastive_loss(sc_outputs, sc_con_targets)
+            sc_con_targets = self._get_sampling_point_classification_targets(od_detached)
+        sc_loss_values = self.sc_contrastive_loss(sc_outputs, sc_con_targets)
 
         return sc_loss_values + od_loss_values
 
@@ -485,8 +416,8 @@ class spatio_temporal_contrast_loss(nn.Module):
                  delta=1.0, sc_class_weights=None,
                  use_focal=False, focal_gamma=2.0,
                  dc_confidence_threshold=0.0,
-                 label_smoothing=0.0, use_soft_dc=False,
-                 ordinal_weight=0.0, dc_temperature: float = 1.0):
+                 label_smoothing=0.0,
+                 ordinal_weight=0.0):
         super().__init__()
 
         self.num_classes = num_classes
@@ -506,9 +437,7 @@ class spatio_temporal_contrast_loss(nn.Module):
             ordinal_weight=ordinal_weight)
         self.dc_loss = dual_task_contrastive_loss(
             self.od_loss, self.sc_loss, seq_length=self.seq_length,
-            confidence_threshold=dc_confidence_threshold,
-            use_soft_labels=use_soft_dc,
-            dc_temperature=dc_temperature)
+            confidence_threshold=dc_confidence_threshold)
 
     def set_dc_weight(self, weight):
         """Set the current dc loss weight (for delayed ramp scheduling)."""
@@ -518,17 +447,15 @@ class spatio_temporal_contrast_loss(nn.Module):
         """Delegate to dc_loss — called each epoch by Trainer to anneal the confidence gate."""
         self.dc_loss.set_dc_confidence(threshold)
 
-    def set_dc_temperature(self, temperature: float) -> None:
-        self.dc_loss.set_dc_temperature(temperature)
-
     def forward(self, od_outputs, sc_outputs, od_targets):
 
-        # Deep copy targets to prevent in-place mutation across loss terms
+        # Clone targets to prevent in-place mutation across loss terms
         od_targets_od = [{k: v.clone() for k, v in t.items()} for t in od_targets]
         od_targets_sc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
+        od_targets_dc = [{k: v.clone() for k, v in t.items()} for t in od_targets]
 
-        # dc_loss uses GT-free C⁻¹ — no od_targets passed
-        dc_loss_val = self.dc_loss(od_outputs, sc_outputs) * self.dc_weight
+        # dc_loss receives GT targets: OD→SC uses od2sc_targets(GT), SC→OD stays prediction-based
+        dc_loss_val = self.dc_loss(od_outputs, sc_outputs, od_targets_dc) * self.dc_weight
         od_loss_val = self.od_loss(od_outputs, od_targets_od)
         sc_loss_val = self.sc_loss(sc_outputs, od2sc_targets(od_targets_sc, self.seq_length))
         total_loss = dc_loss_val + od_loss_val + sc_loss_val

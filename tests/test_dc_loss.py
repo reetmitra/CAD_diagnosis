@@ -193,10 +193,10 @@ def test_spatio_temporal_set_dc_confidence_delegates():
         f"Expected 0.75, got {loss_fn.dc_loss.confidence_threshold}"
 
 
-# ── forward no longer requires od_targets ─────────────────────────────────────
+# ── od_targets behaviour ───────────────────────────────────────────────────────
 
 def test_dc_forward_works_without_od_targets():
-    """dual_task_contrastive_loss.forward must work when called with only 2 args."""
+    """dual_task_contrastive_loss.forward must work when called with only 2 args (GT-free fallback)."""
     dc = _make_dc_loss()
     od_out = _make_od_outputs(batch_size=2, num_queries=5)
     sc_out = {"pred_logits": torch.randn(2, SEQ_LENGTH, NUM_OD_CLASSES + 1)}
@@ -205,10 +205,11 @@ def test_dc_forward_works_without_od_targets():
     assert loss.item() >= 0.0
 
 
-def test_spatio_temporal_forward_does_not_pass_gt_to_dc():
-    """spatio_temporal_contrast_loss.forward must call dc_loss without GT targets.
+def test_spatio_temporal_forward_passes_gt_to_dc():
+    """spatio_temporal_contrast_loss.forward must pass od_targets to dc_loss.
 
-    Verified by monkey-patching dc_loss.forward to assert it receives no od_targets.
+    GT-based OD→SC direction prevents the Healthy-class feedback loop.
+    Verified by monkey-patching dc_loss.forward.
     """
     loss_fn = spatio_temporal_contrast_loss(num_classes=NUM_OD_CLASSES, seq_length=SEQ_LENGTH)
     captured = {}
@@ -233,8 +234,46 @@ def test_spatio_temporal_forward_does_not_pass_gt_to_dc():
     ]
 
     loss_fn(od_out, sc_out, targets)
-    assert captured.get('od_targets') is None, \
-        "spatio_temporal_contrast_loss must not pass od_targets to dc_loss.forward"
+    assert captured.get('od_targets') is not None, \
+        "spatio_temporal_contrast_loss must pass od_targets to dc_loss.forward"
+    assert len(captured['od_targets']) == bs, \
+        f"od_targets must have batch_size={bs} entries, got {len(captured['od_targets'])}"
+
+
+def test_dc_forward_with_od_targets_uses_gt_path():
+    """When od_targets provided, OD→SC uses GT (od2sc_targets), not GT-free predictions.
+
+    We verify this by checking that healthy arteries (empty od_targets) produce
+    all-background SC pseudo-labels even when OD logits predict a strong foreground class.
+    With the GT-free path, the strong OD prediction would corrupt the SC labels.
+    """
+    from optimization import od2sc_targets
+    dc = _make_dc_loss(confidence_threshold=0.0)
+
+    # OD predicts class 0 (Non-sig) with very high confidence for ALL queries
+    logits = torch.full((1, 4, NUM_OD_CLASSES + 1), -10.0)
+    logits[0, :, 0] = 100.0   # all queries predict class 0 (foreground) strongly
+    boxes = torch.tensor([[[0.5, 0.8]]] * 4).reshape(1, 4, 2)
+    od_out = _make_od_outputs(logits=logits, boxes=boxes)
+    sc_out = {"pred_logits": torch.randn(1, SEQ_LENGTH, NUM_OD_CLASSES + 1)}
+
+    # GT says this is a healthy artery — no lesion boxes
+    od_targets_healthy = [{"labels": torch.zeros(0, dtype=torch.long),
+                            "boxes":  torch.zeros((0, 2), dtype=torch.float32)}]
+
+    # GT-free path would assign Non-sig labels everywhere (OD logits are very strong)
+    gt_free_targets = dc._get_sampling_point_classification_targets(od_out)
+    assert gt_free_targets[0]["labels"].any(), \
+        "GT-free path should assign non-zero labels given strong OD predictions"
+
+    # GT path should give all-background regardless of OD predictions
+    gt_based_targets = od2sc_targets(od_targets_healthy, SEQ_LENGTH)
+    assert not gt_based_targets[0]["labels"].any(), \
+        "GT-based path must yield all-background for healthy arteries"
+
+    # Calling forward with od_targets must use the GT path (no exception, finite loss)
+    loss = dc(od_out, sc_out, od_targets_healthy)
+    assert torch.isfinite(loss), "DC loss with GT od_targets must be finite"
 
 
 # ── _compute_dc_confidence annealing ──────────────────────────────────────────
