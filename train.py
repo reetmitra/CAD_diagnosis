@@ -136,6 +136,8 @@ def parse_args(argv=None):
                         help='Disable class weighting for SC loss')
     parser.add_argument('--boost_nonsig', action='store_true', default=False,
                         help='Double loss weight for Non-significant stenosis class (index 2)')
+    parser.add_argument('--boost_sig', action='store_true', default=False,
+                        help='Double loss weight for all Significant+plaque classes (indices 4,5,6 in fine_tuning)')
     parser.add_argument('--ordinal_weight', type=float, default=0.0,
                         help='Weight for ordinal EMD loss term (0=disabled, e.g. 0.5). '
                              'Penalises severity misjudgements proportional to ordinal distance '
@@ -324,13 +326,18 @@ class Trainer:
         sc_class_weights = None
         if self.args.sc_class_weight:
             boost_nonsig = self.args.boost_nonsig
+            boost_sig = self.args.boost_sig
             if boost_nonsig and self.args.pattern != 'fine_tuning':
                 print("  [Warning] --boost_nonsig has no meaningful effect in pre_training mode; ignoring.")
                 boost_nonsig = False
+            if boost_sig and self.args.pattern != 'fine_tuning':
+                print("  [Warning] --boost_sig only applies in fine_tuning mode (num_classes==6); ignoring.")
+                boost_sig = False
             sc_class_weights = compute_sc_class_weights(
                 num_classes=self.num_classes,
                 boost_nonsig=boost_nonsig,
                 nonsig_idx=2,
+                boost_sig=boost_sig,
             )
 
         fw = sc_net_framework(
@@ -1029,6 +1036,7 @@ class Trainer:
             print(f"  Balanced sample:  True")
         print(f"  SC class weight:  {self.args.sc_class_weight}")
         print(f"  NonSig boost:     {self.args.boost_nonsig}")
+        print(f"  Sig boost:        {self.args.boost_sig}")
         print(f"  Focal loss:       {self.args.focal_loss}"
               + (f" (gamma={self.args.focal_gamma})" if self.args.focal_loss else ""))
         print(f"  Num classes:      {self.num_classes}")

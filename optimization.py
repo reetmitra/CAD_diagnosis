@@ -80,7 +80,8 @@ class object_detection_loss(nn.Module):
         return loss_labels + loss_boxes
 
 
-def compute_sc_class_weights(num_classes, boost_nonsig=False, nonsig_idx=2):
+def compute_sc_class_weights(num_classes, boost_nonsig=False, nonsig_idx=2,
+                              boost_sig=False, sig_multiplier=2.0):
     """Return inverse-frequency inspired class weights for SC loss.
 
     Args:
@@ -91,12 +92,20 @@ def compute_sc_class_weights(num_classes, boost_nonsig=False, nonsig_idx=2):
             stenosis class to push the model to differentiate it.
         nonsig_idx: Index into the weights tensor for Non-significant stenosis
             (0=background, 1=Healthy, 2=NonSig, 3=Sig, ...). Default 2.
+        boost_sig: If True, multiply weight for all Significant+plaque classes
+            by sig_multiplier. Only applied in fine_tuning (num_classes==6)
+            where Sig+plaque occupy indices 4,5,6.
+        sig_multiplier: Multiplier applied to Sig class weights. Default 2.0.
     """
     weights = torch.ones(num_classes + 1, dtype=torch.float32)
     weights[0] = 0.5       # background
     weights[1:] = 1.5      # all lesion classes
     if boost_nonsig and nonsig_idx <= num_classes:
         weights[nonsig_idx] = weights[nonsig_idx] * 2.0
+    if boost_sig and num_classes == 6:
+        # fine_tuning 6-class: Sig+Calc=4, Sig+NonCalc=5, Sig+Mix=6
+        for i in range(4, 7):
+            weights[i] = weights[i] * sig_multiplier
     return weights
 
 

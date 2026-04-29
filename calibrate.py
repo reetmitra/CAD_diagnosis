@@ -59,6 +59,10 @@ def parse_args():
     parser.add_argument('--constrain_nonsig_recall', type=float, default=0.0,
                         help='If > 0, run 3D constrained search requiring Non-sig recall '
                              '>= this value (e.g. 0.10). Accepts a trade-off in overall F1.')
+    parser.add_argument('--constrain_sig_recall', type=float, default=0.0,
+                        help='If > 0, constrained search requires Significant recall '
+                             '>= this value (e.g. 0.70). Prevents calibration from '
+                             'sacrificing Sig recall for macro-F1.')
     return parser.parse_args()
 
 
@@ -99,28 +103,27 @@ def search_thresholds(probs, gts, grid_steps=50):
 
 
 def search_thresholds_constrained(probs, gts, grid_steps=30,
-                                  min_nonsig_recall=0.10):
-    """3D grid search over all 3 stenosis thresholds with Non-sig recall constraint.
+                                  min_nonsig_recall=0.0,
+                                  min_sig_recall=0.0):
+    """3D grid search over all 3 stenosis thresholds with optional recall constraints.
 
-    Maximises macro-F1 subject to Non-sig recall >= min_nonsig_recall.
-    Also searches t1 (Non-sig threshold) — lower t1 forces more Non-sig predictions.
-    Falls back to the best unconstrained result if no configuration satisfies the
-    recall constraint.
+    Maximises macro-F1 subject to Non-sig recall >= min_nonsig_recall and/or
+    Significant recall >= min_sig_recall (both default 0.0 = unconstrained).
+    Falls back to the best unconstrained result if no configuration satisfies
+    all constraints.
     """
-    from sklearn.metrics import recall_score
-
     best_f1 = -1.0
     best_t = [1.0, 1.0, 1.0]
     best_f1_unconstrained = -1.0
     best_t_unconstrained = [1.0, 1.0, 1.0]
 
-    # Narrower t1 range: lowering t1 encourages Non-sig predictions
     t0_grid = np.linspace(0.1, 3.0, grid_steps)
-    t1_grid = np.linspace(0.05, 1.5, grid_steps)  # Non-sig: search full range
+    t1_grid = np.linspace(0.05, 1.5, grid_steps)
     t2_grid = np.linspace(0.05, 1.5, grid_steps)
 
     gts_arr = np.array(gts)
     nonsig_mask = gts_arr == 1  # Non-sig is class 1
+    sig_mask    = gts_arr == 2  # Significant is class 2
 
     for t0 in t0_grid:
         for t1 in t1_grid:
@@ -129,24 +132,27 @@ def search_thresholds_constrained(probs, gts, grid_steps=30,
                 preds = threshold_predict(probs, t)
                 f1 = macro_f1(gts, preds)
 
-                # Track best unconstrained result too
                 if f1 > best_f1_unconstrained:
                     best_f1_unconstrained = f1
                     best_t_unconstrained = [float(t0), float(t1), float(t2)]
 
-                # Compute Non-sig recall
                 preds_arr = np.array(preds)
-                if nonsig_mask.sum() > 0:
-                    nonsig_recall = (preds_arr[nonsig_mask] == 1).mean()
-                else:
-                    nonsig_recall = 0.0
+                nonsig_recall = (preds_arr[nonsig_mask] == 1).mean() if nonsig_mask.sum() > 0 else 0.0
+                sig_recall    = (preds_arr[sig_mask]    == 2).mean() if sig_mask.sum()    > 0 else 0.0
 
-                if nonsig_recall >= min_nonsig_recall and f1 > best_f1:
+                if (nonsig_recall >= min_nonsig_recall and
+                        sig_recall >= min_sig_recall and
+                        f1 > best_f1):
                     best_f1 = f1
                     best_t = [float(t0), float(t1), float(t2)]
 
     if best_f1 < 0:
-        print(f"  WARNING: No config satisfied Non-sig recall >= {min_nonsig_recall:.2f}. "
+        constraints = []
+        if min_nonsig_recall > 0:
+            constraints.append(f"Non-sig recall >= {min_nonsig_recall:.2f}")
+        if min_sig_recall > 0:
+            constraints.append(f"Sig recall >= {min_sig_recall:.2f}")
+        print(f"  WARNING: No config satisfied {' and '.join(constraints)}. "
               f"Returning unconstrained best.")
         return best_t_unconstrained, best_f1_unconstrained, False
     return best_t, best_f1, True
@@ -373,17 +379,24 @@ def main():
     # Constrained calibration (optional)
     constrained_best_t = None
     constrained_best_f1 = None
-    if args.constrain_nonsig_recall > 0:
+    _do_constrained = args.constrain_nonsig_recall > 0 or args.constrain_sig_recall > 0
+    if _do_constrained:
+        _constraint_parts = []
+        if args.constrain_nonsig_recall > 0:
+            _constraint_parts.append(f"min Non-sig recall >= {args.constrain_nonsig_recall:.2f}")
+        if args.constrain_sig_recall > 0:
+            _constraint_parts.append(f"min Sig recall >= {args.constrain_sig_recall:.2f}")
         print(f"\n{'='*60}")
         print(f"CONSTRAINED THRESHOLD SEARCH "
-              f"(min Non-sig recall >= {args.constrain_nonsig_recall:.2f}, "
+              f"({', '.join(_constraint_parts)}, "
               f"grid_steps={args.grid_steps})")
         print(f"{'='*60}")
         steps = min(args.grid_steps, 30)
         constrained_best_t, constrained_best_f1, satisfied = \
             search_thresholds_constrained(
                 sten_probs, sten_gts, grid_steps=steps,
-                min_nonsig_recall=args.constrain_nonsig_recall)
+                min_nonsig_recall=args.constrain_nonsig_recall,
+                min_sig_recall=args.constrain_sig_recall)
         con_preds = threshold_predict(sten_probs, constrained_best_t)
         u_con, c_con = np.unique(con_preds, return_counts=True)
         print(f"  Constraint satisfied: {satisfied}")

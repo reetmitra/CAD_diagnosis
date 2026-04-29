@@ -1,0 +1,88 @@
+# SC-Net v16 fine-tuning — v15 recipe + Sig boost + stronger ordinal + eos_coef fix
+#
+# Starting point: v14 pre-trained backbone (checkpoints_v14/best_model.pth)
+# Strategy: same stable v12/v15 recipe; three targeted loss changes to push Sig recall:
+#
+#   1. boost_sig: true
+#      Doubles SC class weight for Sig+Calc (idx 4), Sig+NonCalc (5), Sig+Mix (6).
+#      Directly penalises Sig→Non-sig misses 2× more during training.
+#
+#   2. ordinal_weight: 1.5  (was 0.5 in v15)
+#      OrdinalEMDLoss penalises severity-direction errors proportional to ordinal
+#      distance. Increasing to 1.5 makes Sig under-escalation genuinely costly.
+#      Complementary to boost_sig: class weight shapes the loss surface; ordinal
+#      loss specifically targets the direction of residual errors.
+#
+#   3. eos_coef: 0.20  (was 0.15 in v15)
+#      Higher background weight in OD loss makes the matcher prefer ∅ for
+#      clean vessels, reducing spurious foreground queries on Healthy arteries.
+#      (Was 0.20 in earlier configs; reduced to 0.15 in v12 to fight DC noise.
+#      GT-based DC fix in v15 removes that noise — safe to restore.)
+#
+# Calibration adds --constrain_sig_recall 0.70 to prevent the threshold search
+# from trading Sig recall for macro-F1 (v15's calibrated Sig recall was 0.581).
+#
+# Usage (2x GPU):
+#   torchrun --nproc_per_node=2 --master_port=29510 train.py --distributed \
+#     --config configs/finetune_v16.yaml \
+#     --pretrained ./checkpoints_v14/best_model.pth
+
+pattern: fine_tuning
+data_root: ./dataset/train
+
+# Training schedule — same proven v12/v15 values
+epochs: 250
+lr: 3.0e-5
+weight_decay: 1.0e-4
+grad_clip: 0.1
+warmup_epochs: 10
+
+lr_schedule: cosine_warm_restarts
+lr_t0: 60
+lr_t_mult: 2
+
+swa: true
+swa_start_epoch: 80
+
+dc_warmup_hold: 20
+dc_warmup_ramp: 40
+delta: 0.5
+dc_confidence_threshold: 0.4
+dc_confidence_start: 0.7
+
+label_smoothing: 0.1
+ordinal_weight: 1.5          # increased from 0.5 — stronger penalty for under-escalation
+
+patience: 100
+min_delta: 0.001
+
+balanced_sampling: true
+sc_class_weight: true
+boost_nonsig: true
+boost_sig: true              # new — doubles weight for Sig+plaque SC classes (indices 4,5,6)
+focal_loss: true
+focal_gamma: 2.0
+eos_coef: 0.20               # restored from 0.15 — reduces spurious OD on Healthy vessels
+
+accumulate_steps: 4
+
+amp: true
+ema: true
+ema_decay: 0.999
+layerwise_lr: true
+augment: true
+num_workers: 8
+seed: 42
+patient_split: true
+split_seed: 42
+
+temporal_encoder_layers: 4
+temporal_heads: 8
+spatial_encoder_layers: 4
+spatial_decoder_layers: 4
+
+checkpoint_dir: ./checkpoints_v16_finetune
+save_every: 10
+print_every: 1
+log_dir: ./runs
+log_every: 10
