@@ -1,0 +1,81 @@
+{
+  "timestamp": "2026-04-29T11:53:43.402278",
+  "checkpoint": "./checkpoints_v15_finetune/best_model.pth",
+  "pattern": "fine_tuning",
+  "tta": false,
+  "tta_k": null,
+  "ensemble": false,
+  "num_ensemble_models": 1,
+  "stenosis_metrics": {
+    "acc": 0.8200836820083682,
+    "prec": 0.8385144755576649,
+    "recall": 0.8197332762513279,
+    "f1": 0.8249851692349378,
+    "spec": 0.9056640643754982
+  },
+  "plaque_metrics": {
+    "acc": 0.7421052631578947,
+    "prec": 0.569875669566072,
+    "recall": 0.44782654269225075,
+    "f1": 0.46983799654078295,
+    "spec": 0.9259595407382276
+  },
+  "stenosis_per_class": [
+    {
+      "class": "Healthy",
+      "precision": 0.9186046511627907,
+      "recall": 0.8061224489795918,
+      "f1": 0.858695652173913,
+      "support": 98
+    },
+    {
+      "class": "Non-significant",
+      "precision": 0.7040816326530612,
+      "recall": 0.8466257668711656,
+      "f1": 0.7688022284122562,
+      "support": 163
+    },
+    {
+      "class": "Significant",
+      "precision": 0.8928571428571429,
+      "recall": 0.8064516129032258,
+      "f1": 0.8474576271186439,
+      "support": 217
+    }
+  ],
+  "plaque_per_class": [
+    {
+      "class": "Calcified",
+      "precision": 0.7781954887218046,
+      "recall": 0.9282511210762332,
+      "f1": 0.8466257668711656,
+      "support": 223
+    },
+    {
+      "class": "Non-calcified",
+      "precision": 0.6777777777777778,
+      "recall": 0.6421052631578947,
+      "f1": 0.6594594594594594,
+      "support": 95
+    },
+    {
+      "class": "Mixed",
+      "precision": 0.8235294117647058,
+      "recall": 0.2545454545454545,
+      "f1": 0.38888888888888884,
+      "support": 55
+    }
+  ],
+  "stenosis_auc": {
+    "Healthy": 0.9743823845327605,
+    "Non-significant": 0.7737462265069627,
+    "Significant": 0.8571428571428571
+  },
+  "plaque_auc": {
+    "Calcified": 0.8401431209602954,
+    "Non-calcified": 0.834177261301956,
+    "Mixed": 0.7583216783216784
+  },
+  "num_stenosis_samples": 478,
+  "num_plaque_samples": 380
+}

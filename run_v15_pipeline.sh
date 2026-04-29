@@ -55,7 +55,7 @@ log "=== Stage 3: Evaluation — raw argmax (test split) ==="
 $PYTHON eval.py \
     --checkpoint "$CKPT" \
     --pattern fine_tuning \
-    --data_split test \
+    --data_split testing \
     --detailed \
     --save_results ./predictions_v15 \
     2>&1 | tee -a "$LOG"
@@ -65,7 +65,7 @@ log "=== Stage 4: Evaluation — standard calibrated (test split) ==="
 $PYTHON eval.py \
     --checkpoint "$CKPT" \
     --pattern fine_tuning \
-    --data_split test \
+    --data_split testing \
     --thresholds "$THRESH" \
     --detailed \
     2>&1 | tee -a "$LOG"
@@ -75,7 +75,7 @@ log "=== Stage 5: Evaluation — constrained calibrated (test split) ==="
 $PYTHON eval.py \
     --checkpoint "$CKPT" \
     --pattern fine_tuning \
-    --data_split test \
+    --data_split testing \
     --thresholds "$THRESH_CON" \
     --use_constrained \
     --detailed \
