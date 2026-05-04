@@ -236,5 +236,3 @@ v13 fine-tuning is currently running (`logs_finetune_v13.log`). Three architectu
 Results will be added to this document once v13 training completes and evaluation runs.
 
 ---
-
-*Report compiled: 2026-04-16 | All metrics from `METRICS_2026-04-06.md` test-set evaluation*
