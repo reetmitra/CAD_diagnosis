@@ -58,3 +58,6 @@ TESTING_*.md
 # OS
 .DS_Store
 Thumbs.db
+
+# PDFs
+*.pdf
