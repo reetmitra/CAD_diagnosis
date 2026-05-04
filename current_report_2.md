@@ -202,8 +202,6 @@ Predicted:           105       225     148
 
 **dataset06_LAD — GT: Significant | Pred: Significant ✓**
 
-![Correct Sig LAD](viz_v15/dataset06_LAD__sten_Sig_pred_Sig_CORRECT.png)
-
 Model correctly localises significant stenosis along the LAD. Prediction bar aligns with GT band. Cross-section panels confirm dense calcified plaque in the affected segment.
 
 ---
@@ -211,8 +209,6 @@ Model correctly localises significant stenosis along the LAD. Prediction bar ali
 ### Correct: Non-significant stenosis detected
 
 **PD637_LAD — GT: Non-significant | Pred: Non-significant ✓**
-
-![Correct NonSig LAD](viz_v15/PD637_LAD__sten_NonSig_pred_NonSig_CORRECT.png)
 
 Model identifies a focal non-significant lesion. The prediction bar captures the mild stenosis region without over-escalating to Significant.
 
@@ -222,8 +218,6 @@ Model identifies a focal non-significant lesion. The prediction bar captures the
 
 **PD605_RCA — GT: Healthy | Pred: Healthy ✓**
 
-![Correct Healthy RCA](viz_v15/PD605_RCA__sten_Healthy_pred_Healthy_CORRECT.png)
-
 Clean vessel correctly classified as Healthy (no foreground OD queries survive, 0 surviving queries reported). This was the primary failure mode in v14 — all Healthy vessels were misclassified. v15 corrects this.
 
 ---
@@ -232,8 +226,6 @@ Clean vessel correctly classified as Healthy (no foreground OD queries survive, 
 
 **dataset06_RCA — GT: Significant | Pred: Non-significant ✗**
 
-![Sig as NonSig RCA](viz_v15/dataset06_RCA__sten_Sig_pred_NonSig_WRONG.png)
-
 This is the primary remaining failure mode — 5 of 25 wrong predictions (20%). The model's OD queries fire in the right region but classify the lesion one severity level too low. This directly drives the Sig recall gap (0.806 raw vs 0.733 v12 target — raw already exceeds v12, but calibrated drops to 0.581).
 
 ---
@@ -241,8 +233,6 @@ This is the primary remaining failure mode — 5 of 25 wrong predictions (20%). 
 ### Failure: Healthy misclassified as Non-significant
 
 **PD637_LCX — GT: Healthy | Pred: Non-significant ✗**
-
-![Healthy as NonSig LCX](viz_v15/PD637_LCX__sten_Healthy_pred_NonSig_WRONG.png)
 
 The most frequent error type (9/25 wrong predictions). The OD head fires spurious foreground queries on a visually clean vessel. Healthy recall in raw mode is 0.806 — this artery falls in the 19.4% missed.
 
@@ -288,7 +278,7 @@ The most frequent error type (9/25 wrong predictions). The OD head fires spuriou
 | Raw evaluation (test) | Complete |
 | Standard calibrated evaluation (test) | Complete |
 | Constrained calibrated evaluation (test) | Complete |
-| CPR visualizations (67 test arteries) | Complete — `viz_v15/` |
+| CPR visualizations (67 test arteries) | Pending — `viz_v15/` not yet pushed |
 | Per-artery prediction JSONs | Complete — `predictions_v15_detail/` (67 files) |
 
 ---
